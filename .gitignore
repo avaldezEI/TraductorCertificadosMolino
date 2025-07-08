@@ -1,0 +1,12 @@
+dist
+/dist
+.env
+build
+/build
+configuraciones
+/configuraciones
+*.pyc
+__pycache__
+*.pyo
+*.pyd
+.Python
