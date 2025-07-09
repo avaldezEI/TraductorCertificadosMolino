@@ -1,6 +1,5 @@
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, font
-import tkinter.font as tkFont
 import fitz  # PyMuPDF
 import cv2
 import numpy as np
@@ -18,23 +17,15 @@ except ImportError:
 from datetime import datetime
 from PIL import Image, ImageTk
 
-# Importar módulos especializados
-from ocr_processor import OCRProcessor
-from config_manager import ConfigManager
-from translation_service import TranslationService
-from ui_components import UIComponents
-
 class PDFViewer:
     def __init__(self):
         load_dotenv()
-        
-        # Configuración por defecto
+        self.api_key = os.getenv("DEEPSEEK_API_KEY", "")
         self.block_bg = (1, 1, 1)  # Blanco
         self.block_text_color = (0, 0, 0)  # Negro
         self.block_border_color = (0.7, 0.7, 0.7)  # Gris
         self.block_font_size = 12
         self.auto_open_pdf = True  # Auto-abrir PDF después de guardar
-        self.global_font_size = 12  # Tamaño de fuente global por defecto
         
         self.root = tk.Tk()
         self.root.title("PDF Viewer with OCR and Translation")
@@ -50,6 +41,7 @@ class PDFViewer:
         self.current_rect = None
         self.detected_texts = {}  # {area_index: detected_text}
         self.translated_texts = {}  # {area_index: translated_text}
+        self.api_key = ""
         self.page_rotations = {}  # Rotación independiente por página {page_number: rotation_degrees}
         
         # Variables para redimensionamiento
@@ -58,17 +50,12 @@ class PDFViewer:
         self.resize_handle = None
         self.edit_mode = False
         
-        # Inicializar módulos especializados
         self.api_key = os.getenv("DEEPSEEK_API_KEY", "")
-        self.ocr_processor = OCRProcessor()
-        self.config_manager = ConfigManager()
-        self.translation_service = TranslationService(self.api_key)
-        self.ui_components = UIComponents()
         
         self.setup_ui()
         
     def setup_ui(self):
-        """Configurar la interfaz de usuario usando el módulo UI"""
+        """Configurar la interfaz de usuario"""
         # Crear frame principal con tres paneles
         main_frame = ttk.Frame(self.root)
         main_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
@@ -87,10 +74,215 @@ class PDFViewer:
         right_panel.pack(side=tk.RIGHT, fill=tk.Y, padx=(5, 0))
         right_panel.pack_propagate(False)
         
-        # Configurar paneles usando el módulo UI
-        self.ui_components.setup_left_panel(left_panel, self)
-        self.ui_components.setup_center_panel(center_panel, self)
-        self.ui_components.setup_right_panel(right_panel, self)
+        self.setup_left_panel(left_panel)
+        self.setup_center_panel(center_panel)
+        self.setup_right_panel(right_panel)
+    
+    def setup_left_panel(self, parent):
+        """Configurar panel izquierdo"""
+        # Grupo: Cargar archivo
+        file_group = ttk.LabelFrame(parent, text="Archivo", padding=10)
+        file_group.pack(fill=tk.X, pady=(0, 10))
+        
+        ttk.Button(file_group, text="Cargar PDF", command=self.load_pdf).pack(fill=tk.X)
+        
+        # Grupo: Navegación
+        nav_group = ttk.LabelFrame(parent, text="Navegación", padding=10)
+        nav_group.pack(fill=tk.X, pady=(0, 10))
+        
+        nav_frame = ttk.Frame(nav_group)
+        nav_frame.pack(fill=tk.X)
+        
+        ttk.Button(nav_frame, text="◀", command=self.prev_page, width=3).pack(side=tk.LEFT)
+        
+        self.page_var = tk.StringVar(value="0 / 0")
+        ttk.Label(nav_frame, textvariable=self.page_var).pack(side=tk.LEFT, padx=10, expand=True)
+        
+        ttk.Button(nav_frame, text="▶", command=self.next_page, width=3).pack(side=tk.RIGHT)
+        
+        # Controles de rotación
+        rotation_frame = ttk.Frame(nav_group)
+        rotation_frame.pack(fill=tk.X, pady=(5, 0))
+        
+        ttk.Label(rotation_frame, text="Rotar:").pack(side=tk.LEFT)
+        ttk.Button(rotation_frame, text="↶", command=self.rotate_left, width=3).pack(side=tk.LEFT, padx=(5, 2))
+        ttk.Button(rotation_frame, text="↷", command=self.rotate_right, width=3).pack(side=tk.LEFT, padx=2)
+        ttk.Button(rotation_frame, text="↺", command=self.reset_rotation, width=3).pack(side=tk.LEFT, padx=(2, 0))
+        
+        # Grupo: Zoom
+        zoom_group = ttk.LabelFrame(parent, text="Zoom", padding=10)
+        zoom_group.pack(fill=tk.X, pady=(0, 10))
+        
+        zoom_frame = ttk.Frame(zoom_group)
+        zoom_frame.pack(fill=tk.X)
+        
+        ttk.Button(zoom_frame, text="-", command=self.zoom_out, width=3).pack(side=tk.LEFT)
+        
+        self.zoom_var = tk.StringVar(value="100%")
+        ttk.Label(zoom_frame, textvariable=self.zoom_var).pack(side=tk.LEFT, padx=10, expand=True)
+        
+        ttk.Button(zoom_frame, text="+", command=self.zoom_in, width=3).pack(side=tk.RIGHT)
+        
+        # Grupo: Áreas seleccionadas
+        areas_group = ttk.LabelFrame(parent, text="Áreas Seleccionadas", padding=10)
+        areas_group.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+        
+        # Lista de áreas
+        list_frame = ttk.Frame(areas_group)
+        list_frame.pack(fill=tk.BOTH, expand=True)
+        
+        self.selection_listbox = tk.Listbox(list_frame, height=8)
+        scrollbar = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=self.selection_listbox.yview)
+        self.selection_listbox.config(yscrollcommand=scrollbar.set)
+        
+        self.selection_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        # Bind para mostrar texto del área seleccionada
+        self.selection_listbox.bind("<Button-1>", self.on_area_selection)  # Para mostrar texto del área seleccionada
+        
+        # Botones de control de áreas
+        area_buttons = ttk.Frame(areas_group)
+        area_buttons.pack(fill=tk.X, pady=(5, 0))
+        
+        ttk.Button(area_buttons, text="Editar", command=self.toggle_edit_mode, width=8).pack(side=tk.LEFT, padx=(0, 2))
+        ttk.Button(area_buttons, text="Eliminar", command=self.delete_selected_area, width=8).pack(side=tk.LEFT, padx=2)
+        ttk.Button(area_buttons, text="Limpiar", command=self.clear_selections, width=8).pack(side=tk.RIGHT)
+        
+        # Grupo: Procesamiento
+        process_group = ttk.LabelFrame(parent, text="Procesamiento", padding=10)
+        process_group.pack(fill=tk.X, pady=(0, 10))
+        
+        ttk.Button(process_group, text="Detectar Texto", command=self.detect_text_in_areas).pack(fill=tk.X, pady=(0, 5))
+        ttk.Button(process_group, text="Auto-Detectar Texto", command=self.auto_detect_text_areas).pack(fill=tk.X, pady=(0, 5))
+        ttk.Button(process_group, text="Consolidar Bloques", command=self.consolidate_blocks_by_proximity).pack(fill=tk.X, pady=(0, 5))
+        ttk.Button(process_group, text="Traducir Todo", command=self.translate_all_texts).pack(fill=tk.X, pady=(0, 5))
+        
+        # Checkbox para vista previa de traducción
+        self.show_translation_preview = tk.BooleanVar(value=True)
+        ttk.Checkbutton(process_group, text="Vista previa de traducción", 
+                       variable=self.show_translation_preview,
+                       command=self.update_page_display).pack(anchor=tk.W, pady=(5, 0))
+        
+        # Etiqueta informativa
+        info_label = ttk.Label(process_group, text="💡 Doble-clic en texto traducido para editar", 
+                              font=("Arial", 8), foreground="gray")
+        info_label.pack(anchor=tk.W, pady=(2, 5))
+        
+        ttk.Button(process_group, text="Generar PDF", command=self.generate_output_pdf).pack(fill=tk.X)
+    
+    def setup_center_panel(self, parent):
+        """Configurar panel central"""
+        # Frame para el canvas con scrollbars
+        canvas_frame = ttk.Frame(parent)
+        canvas_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # Crear canvas con scrollbars
+        self.canvas = tk.Canvas(canvas_frame, bg="white")
+        
+        v_scrollbar = ttk.Scrollbar(canvas_frame, orient=tk.VERTICAL, command=self.canvas.yview)
+        h_scrollbar = ttk.Scrollbar(canvas_frame, orient=tk.HORIZONTAL, command=self.canvas.xview)
+        
+        self.canvas.config(yscrollcommand=v_scrollbar.set, xscrollcommand=h_scrollbar.set)
+        
+        # Pack scrollbars y canvas
+        v_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        h_scrollbar.pack(side=tk.BOTTOM, fill=tk.X)
+        self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        
+        # Bind eventos del canvas
+        self.canvas.bind("<Button-1>", self.on_canvas_click)
+        self.canvas.bind("<B1-Motion>", self.on_canvas_drag)
+        self.canvas.bind("<ButtonRelease-1>", self.on_canvas_release)
+        
+        # Bind para teclas (para eliminar con Delete)
+        self.canvas.bind("<KeyPress>", self.on_key_press)
+        self.canvas.focus_set()  # Permitir que el canvas reciba eventos de teclado
+        
+        # Panel de texto detectado
+        text_frame = ttk.LabelFrame(parent, text="Texto Detectado", padding=5)
+        text_frame.pack(fill=tk.X, pady=(5, 0))
+        
+        text_container = ttk.Frame(text_frame)
+        text_container.pack(fill=tk.BOTH, expand=True)
+        
+        self.detected_text = tk.Text(text_container, height=6, wrap=tk.WORD, state=tk.DISABLED)
+        text_scrollbar = ttk.Scrollbar(text_container, orient=tk.VERTICAL, command=self.detected_text.yview)
+        self.detected_text.config(yscrollcommand=text_scrollbar.set)
+        
+        self.detected_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        text_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+    
+    def setup_right_panel(self, parent):
+        """Configurar panel derecho para configuraciones"""
+        # Grupo: API Configuration
+        api_group = ttk.LabelFrame(parent, text="Configuración API", padding=10)
+        api_group.pack(fill=tk.X, pady=(0, 10))
+        
+        ttk.Label(api_group, text="DeepSeek API Key:").pack(anchor=tk.W)
+        self.api_key_var = tk.StringVar(value=self.api_key)
+        api_entry = ttk.Entry(api_group, textvariable=self.api_key_var, show="*")
+        api_entry.pack(fill=tk.X, pady=(2, 5))
+        
+        ttk.Button(api_group, text="Guardar API Key", command=self.save_api_key).pack(fill=tk.X)
+        
+        # Estilo de bloque traducido
+        style_group = ttk.LabelFrame(parent, text="Estilo de Bloque Traducido", padding=10)
+        style_group.pack(fill=tk.X, pady=(0, 10))
+        
+        ttk.Button(style_group, text="Configurar Estilo...", command=self.show_block_style_modal).pack(fill=tk.X)
+        
+        # Grupo: Guardar Configuración
+        save_group = ttk.LabelFrame(parent, text="Guardar Configuración", padding=10)
+        save_group.pack(fill=tk.X, pady=(0, 10))
+        
+        ttk.Label(save_group, text="Nombre:").pack(anchor=tk.W)
+        self.config_name_var = tk.StringVar()
+        ttk.Entry(save_group, textvariable=self.config_name_var).pack(fill=tk.X, pady=(2, 5))
+        
+        ttk.Button(save_group, text="Guardar", command=self.save_configuration).pack(fill=tk.X)
+        
+        # Grupo: Configuraciones Guardadas
+        configs_group = ttk.LabelFrame(parent, text="Configuraciones Guardadas", padding=10)
+        configs_group.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+        
+        # Lista de configuraciones
+        config_list_frame = ttk.Frame(configs_group)
+        config_list_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 5))
+        
+        self.config_listbox = tk.Listbox(config_list_frame, height=6)
+        config_scrollbar = ttk.Scrollbar(config_list_frame, orient=tk.VERTICAL, command=self.config_listbox.yview)
+        self.config_listbox.config(yscrollcommand=config_scrollbar.set)
+        
+        self.config_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        config_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        # Botones de configuraciones
+        config_buttons_frame = ttk.Frame(configs_group)
+        config_buttons_frame.pack(fill=tk.X, pady=(0, 5))
+        
+        ttk.Button(config_buttons_frame, text="Cargar", command=self.load_selected_configuration, width=10).pack(side=tk.LEFT, padx=(0, 2))
+        ttk.Button(config_buttons_frame, text="Eliminar", command=self.delete_configuration, width=10).pack(side=tk.LEFT, padx=2)
+        
+        config_buttons_frame2 = ttk.Frame(configs_group)
+        config_buttons_frame2.pack(fill=tk.X, pady=(0, 5))
+        
+        ttk.Button(config_buttons_frame2, text="Exportar", command=self.export_configuration, width=10).pack(side=tk.LEFT, padx=(0, 2))
+        ttk.Button(config_buttons_frame2, text="Importar", command=self.import_configuration, width=10).pack(side=tk.LEFT, padx=2)
+        
+        # Información de configuración
+        info_group = ttk.LabelFrame(parent, text="Información", padding=10)
+        info_group.pack(fill=tk.X)
+        
+        self.config_info_text = tk.Text(info_group, height=4, wrap=tk.WORD, state=tk.DISABLED)
+        info_scrollbar = ttk.Scrollbar(info_group, orient=tk.VERTICAL, command=self.config_info_text.yview)
+        self.config_info_text.config(yscrollcommand=info_scrollbar.set)
+        
+        self.config_info_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        info_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        # Cargar configuraciones guardadas al inicio
+        self.load_saved_configurations()
     
     def load_pdf(self):
         """Cargar un archivo PDF"""
@@ -246,17 +438,10 @@ class PDFViewer:
                 self.resize_handle = handle_direction
                 return
         
-        # Verificar si se hizo clic en un área existente (esto activa automáticamente el modo edición)
-        area_clicked = self.check_area_click(canvas_x, canvas_y)
-        if area_clicked:
-            # Activar modo edición automáticamente
-            if not self.edit_mode:
-                self.toggle_edit_mode()
-            return
-        
-        # Si no se hizo click en un área y estamos en modo edición, salir del modo edición
+        # Si estamos en modo edición, verificar si se hizo clic en un área existente
         if self.edit_mode:
-            self.toggle_edit_mode()
+            self.check_area_click(canvas_x, canvas_y)
+            return
         
         # Modo selección normal - iniciar nueva selección
         self.start_x = canvas_x
@@ -322,8 +507,7 @@ class PDFViewer:
                     'page': self.current_page,
                     'coords': (x1, y1, x2, y2),  # Coordenadas en PDF
                     'canvas_coords': (self.start_x, self.start_y, canvas_x, canvas_y),  # Coordenadas en canvas
-                    'rect_id': None,
-                    'font_size': self.global_font_size  # Usar tamaño de fuente global por defecto
+                    'rect_id': None
                 }
                 
                 self.selected_areas.append(selection_data)
@@ -350,17 +534,8 @@ class PDFViewer:
             if i in self.translated_texts:
                 status += " [TR]"  # Traducido
             
-            # Mostrar rotación si existe
-            rot = area.get('rotation', 0)
-            rot_str = f" (Rot: {rot}°)" if rot else ""
-            
-            # Mostrar tamaño de fuente si difiere del global
-            area_font_size = area.get('font_size')
-            font_str = ""
-            if area_font_size and area_font_size != self.global_font_size:
-                font_str = f" (Font: {area_font_size}pt)"
-            
-            self.selection_listbox.insert(tk.END, f"Área {i+1}{status}{rot_str}{font_str}")
+            text = f"Área {i + 1} (Pág. {area['page'] + 1}){status}"
+            self.selection_listbox.insert(tk.END, text)
     
     def prev_page(self):
         """Ir a la página anterior"""
@@ -522,12 +697,13 @@ class PDFViewer:
     # Métodos de configuración
     def save_api_key(self):
         self.api_key = self.api_key_var.get().strip()
-        self.translation_service.update_api_key(self.api_key)
-        self.config_manager.save_api_key(self.api_key)
+        # Guardar en .env
+        with open('.env', 'w', encoding='utf-8') as f:
+            f.write(f'DEEPSEEK_API_KEY={self.api_key}\n')
         messagebox.showinfo("Éxito", "API Key guardada correctamente en .env")
     
     def save_configuration(self):
-        """Guardar la configuración actual usando el config manager"""
+        """Guardar la configuración actual"""
         config_name = self.config_name_var.get().strip()
         if not config_name:
             messagebox.showwarning("Advertencia", "Introduce un nombre para la configuración")
@@ -538,25 +714,49 @@ class PDFViewer:
             return
         
         try:
-            # Preparar configuración de estilo
-            style_config = {
-                'block_bg': self.block_bg,
-                'block_text_color': self.block_text_color,
-                'block_border_color': self.block_border_color,
-                'block_font_size': self.block_font_size,
-                'auto_open_pdf': self.auto_open_pdf
+            # Crear directorio si no existe
+            config_dir = "configuraciones"
+            os.makedirs(config_dir, exist_ok=True)
+            
+            # Preparar datos de configuración
+            config_data = {
+                'name': config_name,
+                'created_date': datetime.now().isoformat(),
+                'pdf_file': getattr(self.pdf_document, 'name', 'unknown') if self.pdf_document else None,
+                'total_pages': len(self.pdf_document) if self.pdf_document else 0,
+                'page_rotations': self.page_rotations.copy(),  # Rotaciones independientes por página
+                'style_config': {  # Configuración de estilo
+                    'block_bg': self.block_bg,
+                    'block_text_color': self.block_text_color,
+                    'block_border_color': self.block_border_color,
+                    'block_font_size': self.block_font_size,
+                    'auto_open_pdf': self.auto_open_pdf
+                },
+                'areas': []
             }
             
-            # Usar el config manager para guardar
-            self.config_manager.save_configuration(
-                config_name, 
-                self.pdf_document, 
-                self.selected_areas, 
-                self.detected_texts, 
-                self.translated_texts, 
-                self.page_rotations, 
-                style_config
-            )
+            # Agregar áreas con textos detectados y traducidos
+            for i, area in enumerate(self.selected_areas):
+                area_data = {
+                    'id': i,
+                    'page': area['page'],
+                    'coords': area['coords']
+                }
+                
+                # Agregar texto detectado si existe
+                if i in self.detected_texts:
+                    area_data['detected_text'] = self.detected_texts[i]
+                
+                # Agregar texto traducido si existe
+                if i in self.translated_texts:
+                    area_data['translated_text'] = self.translated_texts[i]
+                
+                config_data['areas'].append(area_data)
+            
+            # Guardar archivo
+            config_file = os.path.join(config_dir, f"{config_name}.json")
+            with open(config_file, 'w', encoding='utf-8') as f:
+                json.dump(config_data, f, indent=2, ensure_ascii=False)
             
             # Actualizar lista de configuraciones
             self.load_saved_configurations()
@@ -570,13 +770,18 @@ class PDFViewer:
             messagebox.showerror("Error", f"No se pudo guardar la configuración: {str(e)}")
     
     def load_saved_configurations(self):
-        """Cargar lista de configuraciones guardadas usando el config manager"""
+        """Cargar lista de configuraciones guardadas"""
         self.config_listbox.delete(0, tk.END)
         
+        config_dir = "configuraciones"
+        if not os.path.exists(config_dir):
+            return
+        
         try:
-            configs = self.config_manager.load_saved_configurations()
-            for config_name in configs:
-                self.config_listbox.insert(tk.END, config_name)
+            for filename in os.listdir(config_dir):
+                if filename.endswith('.json'):
+                    config_name = filename[:-5]  # Remover .json
+                    self.config_listbox.insert(tk.END, config_name)
         except Exception as e:
             print(f"Error al cargar configuraciones: {e}")
     
@@ -591,78 +796,73 @@ class PDFViewer:
         self.load_configuration_by_name(config_name)
     
     def load_configuration_by_name(self, config_name):
-        """Cargar configuración por nombre usando el config manager"""
+        """Cargar configuración por nombre"""
         try:
-            config_data = self.config_manager.load_configuration_by_name(config_name)
+            config_file = os.path.join("configuraciones", f"{config_name}.json")
             
-            if not config_data:
-                messagebox.showerror("Error", f"No se encontró la configuración '{config_name}'")
-                return
+            with open(config_file, 'r', encoding='utf-8') as f:
+                config_data = json.load(f)
             
-            # Cargar datos básicos
-            self.page_rotations = config_data.get('page_rotations', {})
-            
-            # Cargar configuración de estilo
-            style_config = config_data.get('style_config', {})
-            self.block_bg = tuple(style_config.get('block_bg', (1, 1, 1)))
-            self.block_text_color = tuple(style_config.get('block_text_color', (0, 0, 0)))
-            self.block_border_color = tuple(style_config.get('block_border_color', (0.7, 0.7, 0.7)))
-            self.block_font_size = style_config.get('block_font_size', 12)
-            self.auto_open_pdf = style_config.get('auto_open_pdf', True)
-            
-            # Cargar áreas, textos detectados y traducidos
+            # Limpiar selecciones actuales
             self.selected_areas = []
             self.detected_texts = {}
             self.translated_texts = {}
             
-            for i, area_data in enumerate(config_data.get('areas', [])):
-                # Manejar formato de configuración antigua (tuplas) y nueva (diccionarios)
-                if isinstance(area_data, (list, tuple)):
-                    # Formato antiguo: [page, coords] o (page, coords)
-                    if len(area_data) >= 2:
-                        area_dict = {
-                            'page': area_data[0],
-                            'coords': area_data[1],
-                            'font_size': self.global_font_size  # Usar global para formato antiguo
-                        }
-                    else:
-                        continue  # Saltar datos malformados
-                elif isinstance(area_data, dict):
-                    # Formato nuevo: diccionario con claves
-                    area_dict = {
-                        'page': area_data.get('page', 0),
-                        'coords': area_data.get('coords', (0, 0, 100, 100))
-                    }
-                    
-                    # Preservar font_size si existe en la configuración, sino usar el global
-                    if 'font_size' in area_data:
-                        area_dict['font_size'] = area_data['font_size']
-                    else:
-                        area_dict['font_size'] = self.global_font_size
-                    
-                    # Preservar rotación si existe
-                    if 'rotation' in area_data:
-                        area_dict['rotation'] = area_data['rotation']
-                    
-                    # Cargar textos detectados y traducidos
-                    area_id = area_data.get('id', i)
-                    if 'detected_text' in area_data:
-                        self.detected_texts[i] = area_data['detected_text']
-                    
-                    if 'translated_text' in area_data:
-                        self.translated_texts[i] = area_data['translated_text']
-                else:
-                    # Formato desconocido, saltar
-                    continue
-                
-                self.selected_areas.append(area_dict)
+            # Cargar rotaciones de página si existen
+            if 'page_rotations' in config_data:
+                # Convertir las claves de string a int
+                self.page_rotations = {int(k): v for k, v in config_data['page_rotations'].items()}
+            else:
+                self.page_rotations = {}
             
-            # Actualizar interfaz
-            self.update_page_display()
+            # Cargar configuración de estilo si existe
+            if 'style_config' in config_data:
+                style_config = config_data['style_config']
+                if 'block_bg' in style_config:
+                    self.block_bg = tuple(style_config['block_bg'])
+                if 'block_text_color' in style_config:
+                    self.block_text_color = tuple(style_config['block_text_color'])
+                if 'block_border_color' in style_config:
+                    self.block_border_color = tuple(style_config['block_border_color'])
+                if 'block_font_size' in style_config:
+                    self.block_font_size = style_config['block_font_size']
+                if 'auto_open_pdf' in style_config:
+                    self.auto_open_pdf = style_config['auto_open_pdf']
+            
+            # Cargar áreas
+            for i, area_data in enumerate(config_data['areas']):
+                # Convertir coordenadas a coordenadas de canvas según el zoom actual
+                x1, y1, x2, y2 = area_data['coords']
+                canvas_x1 = x1 * self.zoom_factor
+                canvas_y1 = y1 * self.zoom_factor
+                canvas_x2 = x2 * self.zoom_factor
+                canvas_y2 = y2 * self.zoom_factor
+                
+                selection_data = {
+                    'page': area_data['page'],
+                    'coords': (x1, y1, x2, y2),
+                    'canvas_coords': (canvas_x1, canvas_y1, canvas_x2, canvas_y2),
+                    'rect_id': None
+                }
+                
+                self.selected_areas.append(selection_data)
+                
+                # Cargar texto detectado y traducido para esta área específica
+                if "detected_text" in area_data:
+                    self.detected_texts[i] = area_data["detected_text"]
+                if "translated_text" in area_data:
+                    self.translated_texts[i] = area_data["translated_text"]
+            
+            # Actualizar visualización
             self.update_selection_list()
+            self.update_page_display()
             
             # Mostrar información de la configuración
             self.show_config_info(config_data)
+            
+            # Ejecutar detección de texto automáticamente si no hay textos guardados
+            if not self.detected_texts:
+                self.detect_text_in_areas()
             
             messagebox.showinfo("Éxito", f"Configuración '{config_name}' cargada correctamente")
             
@@ -670,19 +870,38 @@ class PDFViewer:
             messagebox.showerror("Error", f"No se pudo cargar la configuración: {str(e)}")
     
     def show_config_info(self, config_data):
-        """Mostrar información de la configuración usando el config manager"""
-        try:
-            info_text = self.config_manager.format_config_info(config_data)
-            
-            self.config_info_text.config(state=tk.NORMAL)
-            self.config_info_text.delete(1.0, tk.END)
-            self.config_info_text.insert(1.0, info_text)
-            self.config_info_text.config(state=tk.DISABLED)
-        except Exception as e:
-            print(f"Error al mostrar información de configuración: {e}")
+        """Mostrar información de la configuración en el panel"""
+        self.config_info_text.config(state=tk.NORMAL)
+        self.config_info_text.delete(1.0, tk.END)
+        
+        info = f"Nombre: {config_data['name']}\n"
+        info += f"Fecha: {config_data['created_date'][:10]}\n"
+        info += f"PDF: {config_data.get('pdf_file', 'N/A')}\n"
+        info += f"Páginas: {config_data['total_pages']}\n"
+        info += f"Áreas: {len(config_data['areas'])}\n"
+        
+        # Mostrar información de rotaciones si existen
+        if 'page_rotations' in config_data and config_data['page_rotations']:
+            info += f"Páginas rotadas: {len(config_data['page_rotations'])}\n"
+            for page, rotation in config_data['page_rotations'].items():
+                info += f"  • Pág. {int(page)+1}: {rotation}°\n"
+        
+        # Mostrar información de estilo si existe
+        if 'style_config' in config_data:
+            style = config_data['style_config']
+            info += f"Estilo personalizado: Sí\n"
+            if 'block_font_size' in style:
+                info += f"  • Tamaño fuente: {style['block_font_size']}\n"
+        
+        info += "\nÁreas:\n"
+        for area in config_data['areas']:
+            info += f"• Área {area['id']+1} (Pág. {area['page']+1})\n"
+        
+        self.config_info_text.insert(1.0, info)
+        self.config_info_text.config(state=tk.DISABLED)
     
     def delete_configuration(self):
-        """Eliminar configuración seleccionada usando el config manager"""
+        """Eliminar la configuración seleccionada"""
         selection = self.config_listbox.curselection()
         if not selection:
             messagebox.showwarning("Advertencia", "Selecciona una configuración para eliminar")
@@ -690,9 +909,10 @@ class PDFViewer:
         
         config_name = self.config_listbox.get(selection[0])
         
-        if messagebox.askyesno("Confirmar", f"¿Estás seguro de que quieres eliminar la configuración '{config_name}'?"):
+        if messagebox.askyesno("Confirmar", f"¿Eliminar la configuración '{config_name}'?"):
             try:
-                self.config_manager.delete_configuration(config_name)
+                config_file = os.path.join("configuraciones", f"{config_name}.json")
+                os.remove(config_file)
                 self.load_saved_configurations()
                 
                 # Limpiar información
@@ -700,13 +920,13 @@ class PDFViewer:
                 self.config_info_text.delete(1.0, tk.END)
                 self.config_info_text.config(state=tk.DISABLED)
                 
-                messagebox.showinfo("Éxito", f"Configuración '{config_name}' eliminada correctamente")
+                messagebox.showinfo("Éxito", f"Configuración '{config_name}' eliminada")
                 
             except Exception as e:
                 messagebox.showerror("Error", f"No se pudo eliminar la configuración: {str(e)}")
     
     def export_configuration(self):
-        """Exportar configuración usando el config manager"""
+        """Exportar configuración a archivo"""
         selection = self.config_listbox.curselection()
         if not selection:
             messagebox.showwarning("Advertencia", "Selecciona una configuración para exportar")
@@ -715,24 +935,73 @@ class PDFViewer:
         config_name = self.config_listbox.get(selection[0])
         
         try:
-            self.config_manager.export_configuration(config_name)
-            messagebox.showinfo("Éxito", f"Configuración '{config_name}' exportada correctamente")
+            # Seleccionar ubicación de exportación
+            export_path = filedialog.asksaveasfilename(
+                title="Exportar configuración",
+                defaultextension=".json",
+                filetypes=[("JSON files", "*.json")],
+                initialvalue=f"{config_name}.json"
+            )
+            
+            if export_path:
+                config_file = os.path.join("configuraciones", f"{config_name}.json")
+                
+                # Copiar archivo
+                with open(config_file, 'r', encoding='utf-8') as src:
+                    with open(export_path, 'w', encoding='utf-8') as dst:
+                        dst.write(src.read())
+                
+                messagebox.showinfo("Éxito", f"Configuración exportada a: {export_path}")
+                
         except Exception as e:
             messagebox.showerror("Error", f"No se pudo exportar la configuración: {str(e)}")
     
     def import_configuration(self):
-        """Importar configuración usando el config manager"""
+        """Importar configuración desde archivo"""
         try:
-            config_name = self.config_manager.import_configuration()
-            if config_name:
+            # Seleccionar archivo a importar
+            import_path = filedialog.askopenfilename(
+                title="Importar configuración",
+                filetypes=[("JSON files", "*.json")]
+            )
+            
+            if import_path:
+                # Leer y validar archivo
+                with open(import_path, 'r', encoding='utf-8') as f:
+                    config_data = json.load(f)
+                
+                # Validar estructura básica
+                if 'name' not in config_data or 'areas' not in config_data:
+                    messagebox.showerror("Error", "El archivo no tiene el formato correcto")
+                    return
+                
+                # Crear directorio si no existe
+                config_dir = "configuraciones"
+                os.makedirs(config_dir, exist_ok=True)
+                
+                # Guardar configuración
+                config_name = config_data['name']
+                config_file = os.path.join(config_dir, f"{config_name}.json")
+                
+                # Verificar si ya existe
+                if os.path.exists(config_file):
+                    if not messagebox.askyesno("Confirmar", f"La configuración '{config_name}' ya existe. ¿Sobrescribir?"):
+                        return
+                
+                with open(config_file, 'w', encoding='utf-8') as f:
+                    json.dump(config_data, f, indent=2, ensure_ascii=False)
+                
+                # Actualizar lista
                 self.load_saved_configurations()
+                
                 messagebox.showinfo("Éxito", f"Configuración '{config_name}' importada correctamente")
+                
         except Exception as e:
             messagebox.showerror("Error", f"No se pudo importar la configuración: {str(e)}")
     
     # Métodos de procesamiento OCR y traducción
     def detect_text_in_areas(self):
-        """Detectar texto en todas las áreas seleccionadas usando el procesador OCR"""
+        """Detectar texto en todas las áreas seleccionadas con OCR mejorado"""
         if not self.pdf_document or not self.selected_areas:
             messagebox.showwarning("Advertencia", "Carga un PDF y selecciona áreas primero")
             return
@@ -764,10 +1033,8 @@ class PDFViewer:
                 progress_bar['value'] = i + 1
                 progress_window.update()
                 
-                # Detectar texto usando el procesador OCR
-                detected_text = self.ocr_processor.enhanced_ocr_detection(
-                    area, self.pdf_document, self.page_rotations
-                )
+                # Detectar texto con OCR mejorado
+                detected_text = self.enhanced_ocr_detection(area)
                 
                 if detected_text and detected_text.strip():
                     self.detected_texts[i] = detected_text.strip()
@@ -790,19 +1057,300 @@ class PDFViewer:
         except Exception as e:
             messagebox.showerror("Error", f"Error en la detección de texto: {str(e)}")
     
+    def enhanced_ocr_detection(self, area):
+        """Detección de texto mejorada con múltiples técnicas de preprocesamiento"""
+        try:
+            # Obtener página
+            page = self.pdf_document[area['page']]
+            
+            # Obtener rotación específica de esta página para la extracción
+            page_rotation = self.page_rotations.get(area['page'], 0)
+            
+            # Renderizar área específica con alta resolución
+            x1, y1, x2, y2 = area['coords']
+            rect = fitz.Rect(x1, y1, x2, y2)
+            
+            # Usar resolución más alta para mejor calidad de OCR
+            mat = fitz.Matrix(3.0, 3.0)  # Zoom 3x para mejor calidad
+            
+            # Aplicar rotación solo durante la extracción si es necesaria
+            if page_rotation != 0:
+                mat = mat * fitz.Matrix(page_rotation)
+            
+            pix = page.get_pixmap(matrix=mat, clip=rect)
+            
+            # Convertir a imagen OpenCV
+            img_data = pix.tobytes("ppm")
+            img_pil = Image.open(io.BytesIO(img_data))
+            img_cv = cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
+            
+            # Verificar si la imagen es muy pequeña
+            height, width = img_cv.shape[:2]
+            #if width < 50 or height < 20:
+            #    return ""
+            
+            # Aplicar múltiples técnicas de preprocesamiento y elegir la mejor
+            results = []
+            
+            # Técnica 1: Preprocesamiento estándar mejorado
+            processed_img1 = self.preprocess_standard_enhanced(img_cv)
+            text1 = self.extract_text_with_config(processed_img1, 'standard')
+            if text1.strip():
+                results.append(('standard', text1, len(text1)))
+            
+            # Técnica 2: Para texto en fondos complejos
+            processed_img2 = self.preprocess_complex_background(img_cv)
+            text2 = self.extract_text_with_config(processed_img2, 'complex')
+            if text2.strip():
+                results.append(('complex', text2, len(text2)))
+            
+            # Técnica 3: Para texto pequeño o de baja calidad
+            processed_img3 = self.preprocess_small_text(img_cv)
+            text3 = self.extract_text_with_config(processed_img3, 'small')
+            if text3.strip():
+                results.append(('small', text3, len(text3)))
+            
+            # Técnica 4: Detección de texto invertido (texto blanco en fondo oscuro)
+            processed_img4 = self.preprocess_inverted_text(img_cv)
+            text4 = self.extract_text_with_config(processed_img4, 'inverted')
+            if text4.strip():
+                results.append(('inverted', text4, len(text4)))
+            
+            # Seleccionar el mejor resultado
+            if results:
+                # Ordenar por longitud de texto (más texto generalmente = mejor resultado)
+                best_result = max(results, key=lambda x: x[2])
+                return best_result[1]
+            
+            return ""
+            
+        except Exception as e:
+            print(f"Error en enhanced_ocr_detection: {e}")
+            return ""
+    
+    def preprocess_standard_enhanced(self, img):
+        """Preprocesamiento estándar mejorado"""
+        # Convertir a escala de grises
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        
+        # Reducir ruido
+        denoised = cv2.fastNlMeansDenoising(gray, h=10, templateWindowSize=7, searchWindowSize=21)
+        
+        # Mejorar contraste usando CLAHE (Contrast Limited Adaptive Histogram Equalization)
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+        enhanced = clahe.apply(denoised)
+        
+        # Aplicar filtro gaussiano para suavizar
+        blurred = cv2.GaussianBlur(enhanced, (1, 1), 0)
+        
+        # Binarización adaptativa
+        thresh = cv2.adaptiveThreshold(blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+                                     cv2.THRESH_BINARY, 11, 2)
+        
+        # Operaciones morfológicas para limpiar la imagen
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 1))
+        cleaned = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
+        
+        return cleaned
+    
+    def preprocess_complex_background(self, img):
+        """Preprocesamiento para texto en fondos complejos"""
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        
+        # Aplicar filtro bilateral para reducir ruido manteniendo bordes
+        bilateral = cv2.bilateralFilter(gray, 9, 75, 75)
+        
+        # Usar múltiples umbrales y combinar resultados
+        # Otsu threshold
+        _, thresh1 = cv2.threshold(bilateral, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        
+        # Adaptive threshold
+        thresh2 = cv2.adaptiveThreshold(bilateral, 255, cv2.ADAPTIVE_THRESH_MEAN_C, 
+                                       cv2.THRESH_BINARY, 15, 10)
+        
+        # Combinar ambos métodos
+        combined = cv2.bitwise_and(thresh1, thresh2)
+        
+        # Operaciones morfológicas
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
+        cleaned = cv2.morphologyEx(combined, cv2.MORPH_OPEN, kernel)
+        
+        return cleaned
+    
+    def preprocess_small_text(self, img):
+        """Preprocesamiento específico para texto pequeño"""
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        
+        # Redimensionar la imagen para hacer el texto más grande
+        height, width = gray.shape
+        scale_factor = max(2.0, 300.0 / min(height, width))  # Escalar para que la dimensión menor sea al menos 300px
+        new_width = int(width * scale_factor)
+        new_height = int(height * scale_factor)
+        
+        # Usar interpolación cúbica para mejor calidad en el escalado
+        resized = cv2.resize(gray, (new_width, new_height), interpolation=cv2.INTER_CUBIC)
+        
+        # Aplicar filtro de enfoque
+        kernel_sharpening = np.array([[-1,-1,-1], 
+                                     [-1, 9,-1],
+                                     [-1,-1,-1]])
+        sharpened = cv2.filter2D(resized, -1, kernel_sharpening)
+        
+        # Reducir ruido
+        denoised = cv2.fastNlMeansDenoising(sharpened, h=5)
+        
+        # Binarización con Otsu
+        _, thresh = cv2.threshold(denoised, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        
+        # Operación de cierre para conectar caracteres fragmentados
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 2))
+        closed = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
+        
+        return closed
+    
+    def preprocess_inverted_text(self, img):
+        """Preprocesamiento para texto invertido (blanco sobre negro)"""
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        
+        # Calcular el promedio de intensidad para detectar si es texto invertido
+        mean_intensity = np.mean(gray)
+        
+        # Si la imagen es predominantemente oscura, probablemente sea texto invertido
+        if mean_intensity < 127:
+            # Invertir la imagen
+            inverted = cv2.bitwise_not(gray)
+        else:
+            inverted = gray
+        
+        # Aplicar CLAHE para mejorar contraste
+        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
+        enhanced = clahe.apply(inverted)
+        
+        # Reducir ruido
+        denoised = cv2.medianBlur(enhanced, 3)
+        
+        # Binarización
+        _, thresh = cv2.threshold(denoised, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        
+        return thresh
+    
+    def extract_text_with_config(self, processed_img, method_type):
+        """Extraer texto con configuración específica de Tesseract según el método"""
+        try:
+            # Configuraciones específicas de Tesseract para diferentes tipos de texto
+            configs = {
+                'standard': '--oem 3 --psm 6 -c tessedit_char_whitelist=0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyzáéíóúñüÁÉÍÓÚÑÜ.,;:()[]{}/-+*=<>¿?¡!@#$%&_|\\"\' ',
+                'complex': '--oem 3 --psm 8',
+                'small': '--oem 3 --psm 8 -c tessedit_char_whitelist=0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyzáéíóúñüÁÉÍÓÚÑÜ.,;:()[]{}/-+*=<>¿?¡!@#$%&_|\\"\' ',
+                'inverted': '--oem 3 --psm 7'
+            }
+            
+            config = configs.get(method_type, '--oem 3 --psm 6')
+            
+            # Extraer texto
+            text = pytesseract.image_to_string(processed_img, lang='spa+eng', config=config)
+            
+            # Post-procesamiento del texto
+            cleaned_text = self.post_process_text(text)
+            
+            return cleaned_text
+            
+        except Exception as e:
+            print(f"Error en extract_text_with_config: {e}")
+            return ""
+    
+    def post_process_text(self, text):
+        """Post-procesamiento del texto extraído"""
+        if not text:
+            return ""
+        
+        # Eliminar caracteres extraños comunes del OCR
+        # Reemplazar caracteres comúnmente mal reconocidos
+        replacements = {
+            '|': 'I',
+            '0': 'O',  # Solo en contextos específicos
+            '1': 'l',  # Solo en contextos específicos
+            '5': 'S',  # Solo en contextos específicos
+            '@': 'a',
+            '8': 'B',  # Solo en contextos específicos
+            '¢': 'c',
+            '€': 'e',
+            '£': 'L',
+            '§': 's',
+        }
+        
+        # Limpiar líneas vacías y espacios extra
+        lines = text.split('\n')
+        cleaned_lines = []
+        
+        for line in lines:
+            line = line.strip()
+            if line:  # Solo agregar líneas no vacías
+                # Eliminar espacios múltiples
+                line = re.sub(r'\s+', ' ', line)
+                
+                # Aplicar reemplazos contextuales (solo si tiene sentido)
+                # Por ejemplo, solo reemplazar 0 por O si está rodeado de letras
+                line = re.sub(r'(?<=[A-Za-z])0(?=[A-Za-z])', 'O', line)
+                line = re.sub(r'(?<=[A-Za-z])1(?=[A-Za-z])', 'l', line)
+                
+                cleaned_lines.append(line)
+        
+        result = '\n'.join(cleaned_lines)
+        
+        # Eliminar caracteres de control y caracteres especiales problemáticos
+        result = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x84\x86-\x9f]', '', result)
+        
+        return result.strip()
+    
     def show_detection_summary(self):
-        """Mostrar resumen de textos detectados usando el servicio de traducción"""
+        """Mostrar resumen de textos detectados"""
         self.detected_text.config(state=tk.NORMAL)
         self.detected_text.delete(1.0, tk.END)
         
-        # Usar el servicio de traducción para generar el resumen
-        content = self.translation_service.get_translation_summary(self.detected_texts, self.translated_texts)
+        content = "=== TEXTOS DETECTADOS ===\n\n"
         
+        for i in sorted(self.detected_texts.keys()):
+            area = self.selected_areas[i]
+            content += f"Área {i + 1} (Página {area['page'] + 1}):\n"
+            
+            # Mostrar texto original con formato preservado
+            original_text = self.detected_texts[i]
+            if '\n' in original_text:
+                # Texto multilínea - mostrar cada línea con indentación
+                lines = original_text.split('\n')
+                for line in lines:
+                    if line.strip():  # Solo líneas con contenido
+                        content += f"  {line}\n"
+                    else:
+                        content += "\n"  # Línea vacía
+            else:
+                # Texto de una línea
+                content += f"  {original_text}\n"
+            
+            if i in self.translated_texts:
+                content += f"Traducción:\n"
+                translated_text = self.translated_texts[i]
+                if '\n' in translated_text:
+                    # Traducción multilínea
+                    lines = translated_text.split('\n')
+                    for line in lines:
+                        if line.strip():
+                            content += f"  {line}\n"
+                        else:
+                            content += "\n"
+                else:
+                    # Traducción de una línea
+                    content += f"  {translated_text}\n"
+            
+            content += "-" * 50 + "\n\n"
+        
+
         self.detected_text.insert(1.0, content)
         self.detected_text.config(state=tk.DISABLED)
 
     def translate_all_texts(self):
-        """Traducir todos los textos detectados usando el servicio de traducción"""
+        """Traducir todos los textos detectados usando DeepSeek API"""
         if not self.api_key:
             messagebox.showwarning("Advertencia", "Configura tu API Key de DeepSeek primero")
             return
@@ -811,7 +1359,7 @@ class PDFViewer:
             messagebox.showwarning("Advertencia", "Detecta texto en las áreas primero")
             return
         
-        # Preparar textos para traducir (solo los que no están traducidos)
+        # Preparar textos para traducir
         texts_to_translate = {}
         for area_index, original_text in self.detected_texts.items():
             if area_index not in self.translated_texts and original_text.strip():
@@ -821,79 +1369,11 @@ class PDFViewer:
             messagebox.showinfo("Información", "Todos los textos ya están traducidos")
             return
         
-        try:
-            # Mostrar ventana de progreso
-            self.progress_window = tk.Toplevel(self.root)
-            self.progress_window.title("Traduciendo...")
-            self.progress_window.geometry("400x150")
-            self.progress_window.transient(self.root)
-            self.progress_window.grab_set()
-            
-            progress_frame = ttk.Frame(self.progress_window)
-            progress_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
-            
-            self.progress_label = ttk.Label(progress_frame, text="Enviando solicitud a DeepSeek...")
-            self.progress_label.pack(pady=(0, 10))
-            
-            self.progress_bar = ttk.Progressbar(progress_frame, mode='indeterminate')
-            self.progress_bar.pack(fill=tk.X, pady=(0, 10))
-            self.progress_bar.start()
-            
-            self.progress_window.update()
-            
-            # Usar el servicio de traducción de forma asíncrona
-            self.translation_service.translate_texts_async(
-                texts_to_translate,
-                callback_success=self._on_translation_success,
-                callback_error=self._on_translation_error,
-                progress_callback=self._on_translation_progress
-            )
-                
-        except Exception as e:
-            if hasattr(self, 'progress_window'):
-                self.progress_window.destroy()
-            messagebox.showerror("Error", f"Error en la traducción: {str(e)}")
-    
-    def _on_translation_success(self, translations):
-        """Callback cuando la traducción es exitosa"""
-        try:
-            # Actualizar textos traducidos
-            for area_index, translated_text in translations.items():
-                self.translated_texts[area_index] = translated_text
-            
-            # Actualizar interfaz
-            self.update_selection_list()
-            self.update_page_display()
-            self.show_detection_summary()
-            
-            # Cerrar ventana de progreso
-            if hasattr(self, 'progress_window'):
-                self.progress_window.destroy()
-            
-            messagebox.showinfo("Éxito", f"Se tradujeron {len(translations)} textos correctamente")
-            
-        except Exception as e:
-            print(f"Error en callback de éxito: {e}")
-    
-    def _on_translation_error(self, error_message):
-        """Callback cuando hay error en la traducción"""
-        try:
-            if hasattr(self, 'progress_window'):
-                self.progress_window.destroy()
-            
-            messagebox.showerror("Error de Traducción", error_message)
-            
-        except Exception as e:
-            print(f"Error en callback de error: {e}")
-    
-    def _on_translation_progress(self, message):
-        """Callback para actualizar progreso de traducción"""
-        try:
-            if hasattr(self, 'progress_label'):
-                self.progress_label.config(text=message)
-                self.progress_window.update()
-        except Exception as e:
-            print(f"Error en callback de progreso: {e}")
+        # Crear el prompt consolidado
+        prompt_content = self.create_translation_prompt(texts_to_translate)
+        
+        # Mostrar el prompt al usuario
+        self.show_translation_prompt(prompt_content, texts_to_translate)
     
     def create_translation_prompt(self, texts_to_translate):
         """Crear el prompt para la traducción"""
@@ -911,7 +1391,6 @@ class PDFViewer:
         prompt_parts.append("- Traduce cada texto preservando el número de área")
         prompt_parts.append("- Mantén el formato técnico si es aplicable")
         prompt_parts.append("- Si hay términos técnicos, úsalos apropiadamente en español")
-        prompt_parts.append("- Los caracteres ||| representan saltos de línea, mantenlos en la traducción")
         prompt_parts.append("- Responde SOLO con las traducciones, manteniendo el formato 'Área X: [traducción]'")
         
         return "\n".join(prompt_parts)
@@ -1065,9 +1544,7 @@ class PDFViewer:
                         area_index = area_num - 1  # Convertir a índice base 0
                         
                         if area_index in original_texts:
-                            # Restaurar saltos de línea si es necesario (la IA podría haber usado ||| en su respuesta)
-                            restored_translation = translation.replace('|||', '\n')
-                            translations[area_index] = restored_translation
+                            translations[area_index] = translation
                 except (ValueError, IndexError):
                     continue
         
@@ -1147,10 +1624,7 @@ class PDFViewer:
                         # Calcular tamaño de fuente apropiado para el área
                         area_width = x2 - x1
                         area_height = y2 - y1
-                        
-                        # Usar tamaño de fuente específico del área o el global
-                        area_font_size = area.get('font_size', self.global_font_size)
-                        font_size = min(area_font_size, area_height / 3)
+                        font_size = min(self.block_font_size, area_height / 3)
                         
                         # Insertar texto traducido con márgenes
                         margin = 3
@@ -1280,14 +1754,9 @@ class PDFViewer:
         area_width = x2 - x1
         area_height = y2 - y1
         
-        # Obtener tamaño de fuente específico del área o usar el global
-        area = self.selected_areas[area_index] if area_index < len(self.selected_areas) else {}
-        area_font_size = area.get('font_size', self.global_font_size)
-        
-        # Calcular tamaño de fuente óptimo usando la función mejorada
-        optimal_font_size = self.calculate_optimal_font_size(
-            translated_text, area_width, area_height, area_font_size
-        )
+        # Calcular tamaño de fuente apropiado
+        font_size = min(self.block_font_size, int(area_height / 4))
+        font_size = max(8, font_size)  # Mínimo 8pt
         
         # Ajustar texto al área
         margin = 4
@@ -1298,8 +1767,8 @@ class PDFViewer:
             return
         
         # Preparar texto ajustado
-        wrapped_text, final_font_size = self.wrap_text_for_canvas(
-            translated_text, text_width, text_height, optimal_font_size
+        wrapped_text, adjusted_font_size = self.wrap_text_for_canvas(
+            translated_text, text_width, text_height, font_size
         )
         
         # Calcular posición del texto
@@ -1314,7 +1783,7 @@ class PDFViewer:
             text_x, text_y,
             text=wrapped_text,
             fill=text_color,
-            font=("Arial", final_font_size),
+            font=("Arial", adjusted_font_size),
             anchor="nw",
             width=text_width
         )
@@ -1330,282 +1799,52 @@ class PDFViewer:
                            lambda e: self.canvas.config(cursor=""))
     
     def wrap_text_for_canvas(self, text, max_width, max_height, font_size):
-        """Ajustar texto para el canvas aprovechando al máximo el alto del área"""
+        """Ajustar texto para el canvas"""
         import tkinter.font as tkFont
         
-        if not text.strip():
-            return "", font_size
+        # Crear fuente para medición
+        font = tkFont.Font(family="Arial", size=font_size)
         
-        # Normalizar saltos de línea: convertir ||| a \n y manejar ambos
-        normalized_text = text.replace('|||', '\n')
-        
-        # Intentar usar el tamaño de fuente óptimo calculado primero
-        optimal_size = self.calculate_optimal_font_size(text, max_width, max_height, font_size)
-        
-        # Probar con el tamaño óptimo y algunos ligeramente menores por seguridad
-        test_sizes = [optimal_size, max(4, optimal_size - 1), max(4, optimal_size - 2)]
-        
-        for test_font_size in test_sizes:
-            try:
-                font = tkFont.Font(family="Arial", size=test_font_size)
-                line_height = font.metrics('linespace')
+        # Dividir en líneas
+        lines = []
+        for paragraph in text.split('|||'):
+            if not paragraph.strip():
+                lines.append('')
+                continue
                 
-                lines = []
-                fits_area = True
+            words = paragraph.split()
+            current_line = []
+            
+            for word in words:
+                # Probar agregar la palabra
+                test_line = current_line + [word]
+                test_text = ' '.join(test_line)
+                text_width = font.measure(test_text)
                 
-                paragraphs = normalized_text.split('\n')
-                for paragraph in paragraphs:
-                    if not paragraph.strip():
-                        lines.append('')
-                        continue
-                    words = paragraph.split()
-                    if not words:
-                        lines.append('')
-                        continue
-                    
-                    current_line = []
-                    for word in words:
-                        test_line = current_line + [word]
-                        test_text = ' '.join(test_line)
-                        text_width = font.measure(test_text)
-                        if text_width <= max_width - 8:
-                            current_line = test_line
-                        else:
-                            if current_line:
-                                lines.append(' '.join(current_line))
-                                current_line = [word]
-                                # Verificar si la palabra sola cabe
-                                word_width = font.measure(word)
-                                if word_width > max_width - 8:
-                                    # Dividir palabra larga
-                                    best_fit = ""
-                                    for i in range(1, len(word) + 1):
-                                        test_word = word[:i]
-                                        if font.measure(test_word + "-") <= max_width - 8:
-                                            best_fit = test_word
-                                        else:
-                                            break
-                                    if len(best_fit) > 0 and len(best_fit) < len(word):
-                                        lines.append(best_fit + "-")
-                                        remaining = word[len(best_fit):]
-                                        current_line = [remaining] if remaining else []
-                                    else:
-                                        fits_area = False
-                                        break
-                            else:
-                                # Primera palabra en la línea es muy larga
-                                word_width = font.measure(word)
-                                if word_width > max_width - 8:
-                                    # Forzar división de palabra
-                                    best_fit = ""
-                                    for i in range(1, len(word) + 1):
-                                        test_word = word[:i]
-                                        if font.measure(test_word) <= max_width - 8:
-                                            best_fit = test_word
-                                        else:
-                                            break
-                                    if best_fit:
-                                        lines.append(best_fit)
-                                        remaining = word[len(best_fit):]
-                                        if remaining:
-                                            current_line = [remaining]
-                                    else:
-                                        fits_area = False
-                                        break
-                                else:
-                                    current_line = [word]
-                    
+                if text_width <= max_width:
+                    current_line = test_line
+                else:
                     if current_line:
                         lines.append(' '.join(current_line))
-                    if not fits_area:
-                        break
-                
-                # Verificar si las líneas caben en la altura
-                total_height = len(lines) * line_height
-                if fits_area and total_height <= max_height - 8:
-                    return '\n'.join(lines), test_font_size
-                    
-            except Exception as e:
-                continue
-        
-        # Fallback: usar tamaño mínimo con truncamiento inteligente
-        min_font_size = 4
-        try:
-            font = tkFont.Font(family="Arial", size=min_font_size)
-            line_height = font.metrics('linespace')
-            max_lines = max(1, int((max_height - 8) / line_height))
-            
-            lines = []
-            paragraphs = normalized_text.split('\n')
-            
-            for paragraph in paragraphs:
-                if len(lines) >= max_lines:
-                    break
-                    
-                if not paragraph.strip():
-                    lines.append("")
-                    continue
-                
-                words = paragraph.split()
-                current_line = []
-                
-                for word in words:
-                    if len(lines) >= max_lines:
-                        break
-                        
-                    test_line = current_line + [word]
-                    test_text = ' '.join(test_line)
-                    text_width = font.measure(test_text)
-                    
-                    if text_width <= max_width - 8:
-                        current_line = test_line
+                        current_line = [word]
                     else:
-                        if current_line:
-                            lines.append(' '.join(current_line))
-                            current_line = [word]
-                        else:
-                            # Palabra muy larga, truncar
-                            chars_per_line = max(1, int((max_width - 8) / (min_font_size * 0.6)))
-                            lines.append(word[:chars_per_line])
-                            current_line = []
-                
-                if current_line and len(lines) < max_lines:
-                    lines.append(' '.join(current_line))
+                        lines.append(word)
             
-            # Si hay más texto que líneas disponibles, agregar "..." al final
-            if len(lines) == max_lines and (len(paragraphs) > len(lines) or 
-                any(len(p.split()) > 10 for p in paragraphs[len(lines):])):
-                if lines:
-                    lines[-1] = lines[-1][:max(0, len(lines[-1]) - 3)] + "..."
-            
-            return '\n'.join(lines), min_font_size
-            
-        except Exception as e:
-            max_chars = max(10, int((max_width * max_height) / (4 * 8)))
-            truncated = text[:max_chars] + "..." if len(text) > max_chars else text
-            return truncated, 4
-
-    def calculate_optimal_font_size(self, text, rect_width, rect_height, max_font_size=24):
-        """Calcular el tamaño de fuente óptimo para aprovechar al máximo el ancho y alto del área"""
-        import tkinter.font as tkFont
-        if not text.strip():
-            return max_font_size
+            if current_line:
+                lines.append(' '.join(current_line))
         
-        normalized_text = text.replace('|||', '\n')
-        paragraphs = normalized_text.split('\n')
+        # Verificar altura total
+        line_height = font.metrics('linespace')
+        total_height = len(lines) * line_height
         
-        def calculate_text_metrics(font_size):
-            """Calcular métricas del texto para un tamaño de fuente dado"""
-            try:
-                font = tkFont.Font(family="Arial", size=font_size)
-                line_height = font.metrics('linespace')
-                total_lines = 0
-                max_line_width = 0  # Ancho máximo de línea
-                
-                for paragraph in paragraphs:
-                    if not paragraph.strip():
-                        total_lines += 1
-                        continue
-                    
-                    words = paragraph.split()
-                    if not words:
-                        total_lines += 1
-                        continue
-                    
-                    current_line_width = 0
-                    lines_needed = 1
-                    
-                    for word in words:
-                        word_width = font.measure(word + " ")
-                        
-                        # Verificar si la palabra cabe en la línea actual
-                        if current_line_width + word_width <= rect_width - 8:
-                            current_line_width += word_width
-                            max_line_width = max(max_line_width, current_line_width)
-                        else:
-                            # Nueva línea necesaria
-                            lines_needed += 1
-                            current_line_width = word_width
-                            max_line_width = max(max_line_width, current_line_width)
-                            
-                            # Manejar palabras muy largas
-                            if word_width > rect_width - 8:
-                                chars_per_line = max(1, int((rect_width - 8) / (font_size * 0.6)))
-                                extra_lines = max(0, (len(word) - 1) // chars_per_line)
-                                lines_needed += extra_lines
-                    
-                    total_lines += lines_needed
-                
-                total_height = total_lines * line_height
-                width_utilization = max_line_width / (rect_width - 8) if rect_width > 8 else 0
-                height_utilization = total_height / (rect_height - 8) if rect_height > 8 else 0
-                
-                return {
-                    'total_lines': total_lines,
-                    'total_height': total_height,
-                    'max_line_width': max_line_width,
-                    'width_utilization': width_utilization,
-                    'height_utilization': height_utilization,
-                    'fits': total_height <= rect_height - 8
-                }
-            except Exception:
-                return None
+        # Ajustar tamaño de fuente si es necesario
+        while total_height > max_height and font_size > 8:
+            font_size -= 1
+            font = tkFont.Font(family="Arial", size=font_size)
+            line_height = font.metrics('linespace')
+            total_height = len(lines) * line_height
         
-        best_font_size = 4
-        best_score = 0
-        target_area = (rect_width - 8) * (rect_height - 8)
-        
-        # Buscar el tamaño de fuente que mejor aproveche el área disponible
-        for font_size in range(int(max_font_size), 3, -1):
-            metrics = calculate_text_metrics(font_size)
-            
-            if metrics is None or not metrics['fits']:
-                continue
-            
-            # Calcular puntuación basada en el aprovechamiento del área
-            # Priorizar el uso del ancho y alto de manera equilibrada
-            width_score = min(1.0, metrics['width_utilization'])
-            height_score = min(1.0, metrics['height_utilization'])
-            
-            # Puntuación combinada: favorece el equilibrio entre ancho y alto
-            # Bonus por usar más del 80% del ancho
-            width_bonus = 1.2 if width_score > 0.8 else 1.0
-            # Bonus por usar más del 80% del alto
-            height_bonus = 1.2 if height_score > 0.8 else 1.0
-            
-            # Puntuación final: combina utilización de ancho y alto, con bonus por usar ambos bien
-            combined_score = (width_score * width_bonus + height_score * height_bonus) / 2
-            
-            # Bonus adicional por tamaño de fuente más grande (mejor legibilidad)
-            size_bonus = font_size / max_font_size * 0.1
-            final_score = combined_score + size_bonus
-            
-            if final_score > best_score:
-                best_score = final_score
-                best_font_size = font_size
-        
-        # Refinamiento: intentar tamaños intermedios si el mejor es significativamente pequeño
-        if best_font_size < max_font_size * 0.7:
-            # Probar tamaños intermedios con incrementos de 0.5
-            for font_size_float in [best_font_size + 0.5, best_font_size + 1, best_font_size + 1.5]:
-                if font_size_float > max_font_size:
-                    break
-                    
-                metrics = calculate_text_metrics(int(font_size_float))
-                if metrics and metrics['fits']:
-                    width_score = min(1.0, metrics['width_utilization'])
-                    height_score = min(1.0, metrics['height_utilization'])
-                    width_bonus = 1.2 if width_score > 0.8 else 1.0
-                    height_bonus = 1.2 if height_score > 0.8 else 1.0
-                    combined_score = (width_score * width_bonus + height_score * height_bonus) / 2
-                    size_bonus = int(font_size_float) / max_font_size * 0.1
-                    final_score = combined_score + size_bonus
-                    
-                    if final_score > best_score:
-                        best_score = final_score
-                        best_font_size = int(font_size_float)
-        
-        return max(4, best_font_size)
+        return '\n'.join(lines), font_size
     
     def edit_translated_text(self, area_index):
         """Abrir editor para texto traducido"""
@@ -1615,7 +1854,7 @@ class PDFViewer:
         # Crear ventana de edición
         edit_window = tk.Toplevel(self.root)
         edit_window.title(f"Editar Traducción - Área {area_index + 1}")
-        edit_window.geometry("700x500")
+        edit_window.geometry("600x400")
         edit_window.transient(self.root)
         edit_window.grab_set()
         
@@ -1639,158 +1878,8 @@ class PDFViewer:
             original_text.insert(1.0, self.detected_texts[area_index])
             original_text.config(state=tk.DISABLED)
         
-        # Frame para configuración de renderizado
-        config_frame = ttk.LabelFrame(main_frame, text="Configuración de Renderizado", padding=5)
-        config_frame.pack(fill=tk.X, pady=(0, 10))
-        
-        # Información sobre saltos de línea
-        info_frame = ttk.Frame(config_frame)
-        info_frame.pack(fill=tk.X, pady=(0, 5))
-        
-        info_text = "💡 Tip: Usa Enter, Ctrl+Enter o el botón 'Salto' para crear nuevas líneas en el texto. El botón 'Aplicar Cambios' guarda los cambios permanentemente."
-        ttk.Label(info_frame, text=info_text, font=("Arial", 8), foreground="blue").pack(anchor=tk.W)
-        
-        # Control de tamaño de fuente y utilidades
-        font_frame = ttk.Frame(config_frame)
-        font_frame.pack(fill=tk.X, pady=2)
-        ttk.Label(font_frame, text="Tamaño de fuente:").pack(side=tk.LEFT)
-        
-        # Variable para el tamaño de fuente del área específica
-        area = self.selected_areas[area_index] if area_index < len(self.selected_areas) else {}
-        current_font_size = area.get('font_size', self.global_font_size)
-        font_size_var = tk.IntVar(value=current_font_size)
-        font_size_spinbox = ttk.Spinbox(font_frame, from_=8, to=24, width=5, textvariable=font_size_var)
-        font_size_spinbox.pack(side=tk.LEFT, padx=(5, 10))
-        
-        # Botón para insertar salto de línea
-        def insert_line_break():
-            """Insertar salto de línea en la posición del cursor"""
-            try:
-                cursor_pos = text_edit.index(tk.INSERT)
-                text_edit.insert(cursor_pos, '\n')
-            except:
-                pass
-        
-        ttk.Button(font_frame, text="↵ Salto", 
-                  command=insert_line_break).pack(side=tk.LEFT, padx=(10, 0))
-        
-        # Vista previa del área
-        preview_frame = ttk.LabelFrame(main_frame, text="Vista Previa del Área", padding=5)
-        preview_frame.pack(fill=tk.X, pady=(0, 10))
-        
-        # Canvas para vista previa
-        preview_canvas = tk.Canvas(preview_frame, height=120, bg="white")
-        preview_canvas.pack(fill=tk.X, pady=2)
-        
-        def update_render():
-            """Actualizar renderizado con nueva configuración"""
-            # Verificar si text_edit existe antes de usarlo
-            try:
-                current_text = text_edit.get(1.0, tk.END).strip()
-            except:
-                messagebox.showwarning("Advertencia", "Editor de texto no disponible")
-                return
-                
-            if not current_text:
-                messagebox.showwarning("Advertencia", "No hay texto para actualizar")
-                return
-                
-            # Actualizar el texto traducido
-            self.translated_texts[area_index] = current_text
-            
-            # Guardar permanentemente el tamaño de fuente en el área
-            area = self.selected_areas[area_index]
-            area['font_size'] = font_size_var.get()
-            
-            # Actualizar vista en el canvas principal
-            self.update_page_display()
-            self.show_detection_summary()
-            
-            # Actualizar vista previa inmediatamente
-            try:
-                update_preview()
-            except:
-                pass  # update_preview podría no estar definida aún
-            
-            # Mostrar mensaje de confirmación más discreto
-            def show_temp_message():
-                try:
-                    temp_label = ttk.Label(button_frame, text="✅ Cambios aplicados", foreground="green")
-                    temp_label.pack(side=tk.LEFT, padx=(5, 0))
-                    edit_window.after(2000, temp_label.destroy)  # Desaparece después de 2 segundos
-                except:
-                    pass  # button_frame podría no estar definido aún
-            
-            show_temp_message()
-        
-        # Ahora agregar el botón después de definir la función
-        ttk.Button(font_frame, text="🔄 Actualizar", 
-                  command=update_render).pack(side=tk.LEFT, padx=(20, 0))
-        
-        def update_preview():
-            """Actualizar vista previa del área con el texto actual"""
-            preview_canvas.delete("all")
-            
-            # Obtener texto actual del editor
-            current_text = text_edit.get(1.0, tk.END).strip()
-            if not current_text:
-                return
-            
-            # Simular el área del PDF (escalada para la vista previa)
-            area = self.selected_areas[area_index]
-            x1, y1, x2, y2 = area['coords']
-            area_width = x2 - x1
-            area_height = y2 - y1
-            
-            # Escalar para que quepa en la vista previa
-            canvas_width = preview_canvas.winfo_width() or 400
-            canvas_height = 100
-            
-            scale_x = min(canvas_width / area_width, canvas_height / area_height) * 0.8
-            preview_width = area_width * scale_x
-            preview_height = area_height * scale_x
-            
-            # Centrar en el canvas
-            start_x = (canvas_width - preview_width) / 2
-            start_y = (canvas_height - preview_height) / 2
-            
-            # Dibujar rectángulo del área
-            preview_canvas.create_rectangle(
-                start_x, start_y, start_x + preview_width, start_y + preview_height,
-                fill=self._rgb_to_hex(self.block_bg),
-                outline=self._rgb_to_hex(self.block_border_color),
-                width=2
-            )
-            
-            # Calcular tamaño de fuente para la vista previa
-            preview_font_size = max(8, int(font_size_var.get() * scale_x))
-            
-            # Ajustar texto para la vista previa
-            margin = 2
-            text_width = preview_width - (2 * margin)
-            text_height = preview_height - (2 * margin)
-            
-            if text_width > 0 and text_height > 0:
-                wrapped_text, adjusted_font_size = self.wrap_text_for_canvas(
-                    current_text, text_width, text_height, preview_font_size
-                )
-                
-                # Mostrar texto en la vista previa
-                preview_canvas.create_text(
-                    start_x + margin, start_y + margin,
-                    text=wrapped_text,
-                    fill=self._rgb_to_hex_text_color(self.block_text_color),
-                    font=("Arial", max(6, adjusted_font_size)),
-                    anchor="nw",
-                    width=text_width
-                )
-        
         # Texto traducido (editable)
-        translation_header_frame = ttk.Frame(main_frame)
-        translation_header_frame.pack(fill=tk.X, pady=(0, 5))
-        
-        ttk.Label(translation_header_frame, text="Traducción:").pack(side=tk.LEFT)
-        
+        ttk.Label(main_frame, text="Traducción:").pack(anchor=tk.W)
         text_frame = ttk.Frame(main_frame)
         text_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
         
@@ -1808,114 +1897,19 @@ class PDFViewer:
         button_frame = ttk.Frame(main_frame)
         button_frame.pack(fill=tk.X)
         
-        def save_and_close():
-            """Guardar cambios, aplicar configuración y cerrar ventana"""
-            current_text = text_edit.get(1.0, tk.END).strip()
-            if current_text:
-                # Actualizar el texto traducido
-                self.translated_texts[area_index] = current_text
-                
-                # Guardar el tamaño de fuente específico para esta área
-                area = self.selected_areas[area_index]
-                area['font_size'] = font_size_var.get()
-                
-                # Actualizar vista en el canvas principal
+        def save_changes():
+            new_text = text_edit.get(1.0, tk.END).strip()
+            if new_text:
+                self.translated_texts[area_index] = new_text
                 self.update_page_display()
                 self.show_detection_summary()
-                
-                edit_window.destroy()
-                messagebox.showinfo("Guardado", f"Traducción del Área {area_index + 1} guardada correctamente\nTamaño de fuente específico: {font_size_var.get()}pt")
-            else:
-                messagebox.showwarning("Advertencia", "No hay texto para guardar")
+            edit_window.destroy()
         
         def cancel_edit():
             edit_window.destroy()
         
-        # Botones simplificados
-        button_left = ttk.Frame(button_frame)
-        button_left.pack(side=tk.LEFT)
-        
-        # Vista previa temporal sin guardar
-        ttk.Button(button_left, text="🔄 Aplicar Cambios", 
-                  command=lambda: update_render()).pack(side=tk.LEFT, padx=(0, 10))
-        
-        button_right = ttk.Frame(button_frame)
-        button_right.pack(side=tk.RIGHT)
-        
-        ttk.Button(button_right, text="❌ Cancelar", 
-                  command=cancel_edit).pack(side=tk.LEFT, padx=(0, 5))
-        ttk.Button(button_right, text="💾 Guardar y Cerrar", 
-                  command=save_and_close).pack(side=tk.LEFT)
-        
-        # Vincular eventos para actualización automática de vista previa
-        def on_text_change(*args):
-            edit_window.after_idle(update_preview)
-        
-        def on_font_change(*args):
-            edit_window.after_idle(update_preview)
-        
-        def on_key_press(event):
-            # Atajo F5 para actualizar
-            if event.keysym == 'F5':
-                update_render()
-                return 'break'
-            # Atajo Ctrl+Enter para insertar salto de línea
-            elif event.keysym == 'Return' and event.state & 0x4:  # Ctrl está presionado
-                cursor_pos = text_edit.index(tk.INSERT)
-                text_edit.insert(cursor_pos, '\n')
-                return 'break'
-        
-        # Vincular cambios en el texto
-        text_edit.bind('<KeyRelease>', on_text_change)
-        text_edit.bind('<Button-1>', lambda e: edit_window.after(50, update_preview))
-        text_edit.bind('<Key>', on_key_press)
-        
-        # Vincular cambios en el tamaño de fuente
-        font_size_var.trace('w', on_font_change)
-        
-        # Vincular F5 a la ventana también
-        edit_window.bind('<F5>', lambda e: update_render())
-        
-        # Actualizar vista previa inicial después de que la ventana se muestre
-        edit_window.after(200, update_preview)
-
-    def on_global_font_change(self):
-        """Callback cuando cambia el tamaño de fuente global"""
-        try:
-            new_size = self.global_font_var.get()
-            if new_size != self.global_font_size:
-                self.global_font_size = new_size
-                # Solo actualizar el valor, sin aplicar automáticamente a todas las áreas
-                # El usuario debe usar "Aplicar a Todo" para cambiar áreas existentes
-        except tk.TclError:
-            # Error en la conversión, mantener valor actual
-            pass
-    
-    def apply_global_font_to_all(self):
-        """Aplicar el tamaño de fuente global a todas las áreas y actualizar renderizado"""
-        try:
-            font_size = self.global_font_var.get()
-            
-            if not self.selected_areas:
-                messagebox.showinfo("Información", "No hay áreas seleccionadas para aplicar el tamaño de fuente.")
-                return
-            
-            # Aplicar a todas las áreas existentes
-            for i, area in enumerate(self.selected_areas):
-                area['font_size'] = font_size
-            
-            # Actualizar tamaño global también
-            self.global_font_size = font_size
-            
-            # Actualizar renderizado del canvas y la lista de áreas
-            self.update_page_display()
-            self.update_selection_list()
-            
-                       
-            messagebox.showinfo("Aplicado", f"Tamaño de fuente {font_size}pt aplicado a {len(self.selected_areas)} área(s).\nCanvas actualizado automáticamente.")
-            
-        except Exception as e:
-            messagebox.showerror("Error", f"Error al aplicar tamaño de fuente: {str(e)}")
+        ttk.Button(button_frame, text="Guardar", command=save_changes).pack(side=tk.RIGHT, padx=(5, 0))
+        ttk.Button(button_frame, text="Cancelar", command=cancel_edit).pack(side=tk.RIGHT)
 
     def show_area_text(self, area_index):
         """Mostrar el texto del área seleccionada"""
@@ -2029,7 +2023,6 @@ class PDFViewer:
         if y1 > y2:
             y1, y2 = y2, y1
         
-        
         # Verificar tamaño mínimo
         if abs(x2 - x1) < 20 or abs(y2 - y1) < 20:
             return
@@ -2056,18 +2049,15 @@ class PDFViewer:
         if not text.strip():
             return text, font_size
         
-        # Normalizar saltos de línea: convertir ||| a \n
-        normalized_text = text.replace('|||', '\n')
+        # Primero, verificar si el texto tiene saltos de línea originales
+        original_lines = text.split('\n')
         
-        # Verificar si el texto tiene saltos de línea
-        original_lines = normalized_text.split('\n')
-        
-        # Si el texto tiene múltiples líneas, preservar la estructura
+        # Si el texto original tiene múltiples líneas, preservar la estructura
         if len(original_lines) > 1:
             return self._fit_multiline_text(original_lines, rect_width, rect_height, font_size)
         
         # Si es una sola línea, usar el método de ajuste automático por palabras
-        return self._fit_single_line_text(normalized_text, rect_width, rect_height, font_size)
+        return self._fit_single_line_text(text, rect_width, rect_height, font_size)
     
     def _fit_multiline_text(self, original_lines, rect_width, rect_height, font_size):
         """Ajustar texto que ya tiene múltiples líneas preservando la estructura original"""
@@ -2137,7 +2127,7 @@ class PDFViewer:
             # Verificar si todas las líneas caben en la altura
             total_height = len(adjusted_lines) * line_height
             
-            if total_height <= rect_height - 6:  # Margen de 3px arriba y abajo
+            if total_height <= rect_height - 6:
                 return "\n".join(adjusted_lines), test_font_size
         
         # Si nada funciona, usar el tamaño más pequeño
@@ -2221,126 +2211,6 @@ class PDFViewer:
         
         return "\n".join(lines), min_font_size
 
-    def adjust_selected_area(self, direction):
-        """Ajustar horizontalmente el área seleccionada"""
-        if self.selected_area_index is None or not self.edit_mode:
-            messagebox.showwarning("Advertencia", "Primero seleccione un área en modo edición")
-            return
-        
-        area = self.selected_areas[self.selected_area_index]
-        if area['page'] != self.current_page:
-            return
-        
-        # Obtener coordenadas actuales
-        x1, y1, x2, y2 = area['coords']
-        
-        # Ajuste en píxeles (convertido a coordenadas PDF)
-        adjustment = 5 / self.zoom_factor
-        
-        if direction == 'left':
-            # Mover área hacia la izquierda
-            x1 -= adjustment
-            x2 -= adjustment
-        elif direction == 'right':
-            # Mover área hacia la derecha
-            x1 += adjustment
-            x2 += adjustment
-        
-        # Asegurarse de que no se salga de los límites de la página
-        page = self.pdf_document[self.current_page]
-        page_width = page.rect.width
-        page_height = page.rect.height
-        
-        if x1 < 0:
-            offset = -x1
-            x1 += offset
-            x2 += offset
-        elif x2 > page_width:
-            offset = x2 - page_width
-            x1 -= offset
-            x2 -= offset
-        
-        # Actualizar coordenadas
-        area['coords'] = (x1, y1, x2, y2)
-        
-        # Actualizar coordenadas del canvas
-        canvas_x1 = x1 * self.zoom_factor
-        canvas_y1 = y1 * self.zoom_factor
-        canvas_x2 = x2 * self.zoom_factor
-        canvas_y2 = y2 * self.zoom_factor
-        area['canvas_coords'] = (canvas_x1, canvas_y1, canvas_x2, canvas_y2)
-        
-        # Actualizar visualización
-        self.update_page_display()
-        self.create_resize_handles(self.selected_area_index)
-    
-    def rotate_selected_area(self, degrees):
-        """Rotar el área seleccionada (visual, para referencia de texto)"""
-        if self.selected_area_index is None or not self.edit_mode:
-            messagebox.showwarning("Advertencia", "Primero seleccione un área en modo edición")
-            return
-        
-        area = self.selected_areas[self.selected_area_index]
-        if area['page'] != self.current_page:
-            return
-        
-        # Agregar o actualizar rotación del área
-        if 'rotation' not in area:
-            area['rotation'] = 0
-        
-        area['rotation'] = (area['rotation'] + degrees) % 360
-        
-        # Si el área tiene texto traducido, agregar indicador visual de rotación
-        if self.selected_area_index in self.translated_texts:
-            rotation_indicator = f" [↻{area['rotation']}°]" if area['rotation'] != 0 else ""
-            
-            # Actualizar lista de selecciones para mostrar rotación
-            self.update_selection_list()
-            
-            # Mostrar mensaje informativo
-            messagebox.showinfo("Rotación aplicada", 
-                              f"Área {self.selected_area_index + 1} rotada {degrees}° (Total: {area['rotation']}°)\n"
-                              f"Esta rotación se aplicará al texto al renderizar en el PDF final.")
-        else:
-            messagebox.showinfo("Rotación aplicada", 
-                              f"Área {self.selected_area_index + 1} rotada {degrees}° (Total: {area['rotation']}°)\n"
-                              f"Agregue texto traducido para ver el efecto de la rotación.")
-        
-        # Actualizar visualización para mostrar indicador
-        self.update_page_display()
-        self.create_resize_handles(self.selected_area_index)
-    
-    def on_canvas_double_click(self, event):
-        """Manejar doble clic en el canvas para abrir editor de texto"""
-        if not self.pdf_document:
-            return
-        
-        canvas_x = self.canvas.canvasx(event.x)
-        canvas_y = self.canvas.canvasy(event.y)
-        
-        # Buscar el área en la que se hizo doble click
-        for i, area in enumerate(self.selected_areas):
-            if area['page'] == self.current_page:
-                x1, y1, x2, y2 = area['canvas_coords']
-                if x1 <= canvas_x <= x2 and y1 <= canvas_y <= y2:
-                    # Abrir editor de texto traducido si ya existe traducción
-                    if i in self.translated_texts:
-                        self.edit_translated_text(i)
-                    else:
-                        # Si no hay traducción pero hay texto detectado, sugerir traducir primero
-                        if i in self.detected_texts:
-                            result = messagebox.askyesno(
-                                "Traducir primero",
-                                f"El Área {i + 1} tiene texto detectado pero no traducido.\n¿Desea traducir el texto primero?"
-                            )
-                            if result:
-                                # Mostrar mensaje informativo
-                                messagebox.showinfo("Traducir área", "Use el botón 'Traducir Todo' para traducir las áreas y luego haga doble click nuevamente.")
-                        else:
-                            messagebox.showinfo("Sin texto", f"El Área {i + 1} no tiene texto detectado.\nPrimero realice OCR en esta área.")
-                    return
-        return False
-    
 
 if __name__ == "__main__":
     app = PDFViewer()

@@ -3,3 +3,5 @@ Pillow==10.2.0
 opencv-python==4.8.1.78
 pytesseract==0.3.10
 requests==2.31.0
+numpy==1.24.3
+python-dotenv==1.0.0
