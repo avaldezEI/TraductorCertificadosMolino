@@ -146,6 +146,9 @@ class PDFViewer:
             # Configurar región de scroll
             self.canvas.configure(scrollregion=self.canvas.bbox("all"))
             
+            # Actualizar coordenadas canvas antes de dibujar las áreas
+            self.update_canvas_coords_for_areas()
+            
             # Dibujar áreas seleccionadas para esta página
             self.draw_selected_areas()
             
@@ -160,6 +163,16 @@ class PDFViewer:
         """Dibujar las áreas seleccionadas en la página actual"""
         for i, area in enumerate(self.selected_areas):
             if area['page'] == self.current_page:
+                # Verificar si existen canvas_coords, si no, calcularlas
+                if 'canvas_coords' not in area:
+                    x1, y1, x2, y2 = area['coords']
+                    # Aplicar zoom para obtener coordenadas canvas
+                    canvas_x1 = x1 * self.zoom_factor
+                    canvas_y1 = y1 * self.zoom_factor
+                    canvas_x2 = x2 * self.zoom_factor
+                    canvas_y2 = y2 * self.zoom_factor
+                    area['canvas_coords'] = (canvas_x1, canvas_y1, canvas_x2, canvas_y2)
+                
                 x1, y1, x2, y2 = area['canvas_coords']
                 
                 # Determinar el color del rectángulo según el estado
@@ -593,11 +606,16 @@ class PDFViewer:
     def load_configuration_by_name(self, config_name):
         """Cargar configuración por nombre usando el config manager"""
         try:
-            config_data = self.config_manager.load_configuration_by_name(config_name)
+            config_data, message = self.config_manager.load_configuration_by_name(config_name)
             
             if not config_data:
-                messagebox.showerror("Error", f"No se encontró la configuración '{config_name}'")
+                messagebox.showerror("Error", f"No se encontró la configuración '{config_name}': {message}")
                 return
+            
+            # Limpiar datos actuales
+            self.selected_areas = []
+            self.detected_texts = {}
+            self.translated_texts = {}
             
             # Cargar datos básicos
             self.page_rotations = config_data.get('page_rotations', {})
@@ -610,11 +628,7 @@ class PDFViewer:
             self.block_font_size = style_config.get('block_font_size', 12)
             self.auto_open_pdf = style_config.get('auto_open_pdf', True)
             
-            # Cargar áreas, textos detectados y traducidos
-            self.selected_areas = []
-            self.detected_texts = {}
-            self.translated_texts = {}
-            
+            # Cargar áreas - SOLO las áreas, NO los textos detectados ni traducidos
             for i, area_data in enumerate(config_data.get('areas', [])):
                 # Manejar formato de configuración antigua (tuplas) y nueva (diccionarios)
                 if isinstance(area_data, (list, tuple)):
@@ -634,6 +648,11 @@ class PDFViewer:
                         'coords': area_data.get('coords', (0, 0, 100, 100))
                     }
                     
+                    # Validar que las coordenadas sean válidas
+                    coords = area_dict['coords']
+                    if not isinstance(coords, (list, tuple)) or len(coords) != 4:
+                        continue  # Saltar área con coordenadas inválidas
+                    
                     # Preservar font_size si existe en la configuración, sino usar el global
                     if 'font_size' in area_data:
                         area_dict['font_size'] = area_data['font_size']
@@ -644,13 +663,9 @@ class PDFViewer:
                     if 'rotation' in area_data:
                         area_dict['rotation'] = area_data['rotation']
                     
-                    # Cargar textos detectados y traducidos
-                    area_id = area_data.get('id', i)
-                    if 'detected_text' in area_data:
-                        self.detected_texts[i] = area_data['detected_text']
+                    # NO cargar textos detectados ni traducidos - solo las áreas
+                    # Esto fuerza la extracción y traducción para el nuevo documento
                     
-                    if 'translated_text' in area_data:
-                        self.translated_texts[i] = area_data['translated_text']
                 else:
                     # Formato desconocido, saltar
                     continue
@@ -658,17 +673,86 @@ class PDFViewer:
                 self.selected_areas.append(area_dict)
             
             # Actualizar interfaz
-            self.update_page_display()
+            if self.pdf_document:  # Solo actualizar si hay un PDF cargado
+                try:
+                    self.update_canvas_coords_for_areas()  # Actualizar coordenadas canvas
+                    self.update_page_display()
+                except Exception as e:
+                    print(f"Error al actualizar coordenadas canvas: {e}")
+                    # Intentar actualizar solo la página sin coordenadas canvas
+                    self.update_page_display()
             self.update_selection_list()
             
             # Mostrar información de la configuración
             self.show_config_info(config_data)
             
-            messagebox.showinfo("Éxito", f"Configuración '{config_name}' cargada correctamente")
+            # No mostrar resumen de textos ya que no se cargan
+            
+            areas_loaded = len(self.selected_areas)
+            
+            messagebox.showinfo("Éxito", 
+                f"Configuración '{config_name}' cargada correctamente\n\n"
+                f"• Áreas cargadas: {areas_loaded}\n"
+                f"• Textos detectados: 0 (se detectarán automáticamente)\n"
+                f"• Traducciones: 0 (se traducirán automáticamente)\n\n"
+                f"Usa 'Detectar Texto' y 'Traducir Todo' para procesar el documento con estas áreas.")
             
         except Exception as e:
             messagebox.showerror("Error", f"No se pudo cargar la configuración: {str(e)}")
+            # En caso de error, limpiar datos parciales
+            self.selected_areas = []
+            self.detected_texts = {}
+            self.translated_texts = {}
+            self.update_selection_list()
+            if self.pdf_document:
+                self.update_page_display()
     
+    def update_canvas_coords_for_areas(self):
+        """Actualizar las coordenadas canvas para todas las áreas después de cargar una configuración"""
+        if not self.pdf_document:
+            return
+            
+        for area in self.selected_areas:
+            # Verificar que el área tenga coordenadas PDF válidas
+            if 'coords' not in area:
+                continue
+                
+            # Convertir coordenadas PDF a coordenadas canvas
+            x1, y1, x2, y2 = area['coords']
+            
+            # Aplicar zoom
+            canvas_x1 = x1 * self.zoom_factor
+            canvas_y1 = y1 * self.zoom_factor
+            canvas_x2 = x2 * self.zoom_factor
+            canvas_y2 = y2 * self.zoom_factor
+            
+            # Guardar coordenadas canvas
+            area['canvas_coords'] = (canvas_x1, canvas_y1, canvas_x2, canvas_y2)
+    
+    def clear_detected_and_translated_texts(self):
+        """Limpiar textos detectados y traducidos para forzar nueva detección"""
+        if not self.selected_areas:
+            messagebox.showwarning("Advertencia", "No hay áreas cargadas")
+            return
+        
+        if messagebox.askyesno("Confirmar", 
+            "¿Estás seguro de que quieres limpiar todos los textos detectados y traducidos?\n\n"
+            "Esto te permitirá detectar texto fresco en las áreas cargadas para el nuevo documento."):
+            
+            # Limpiar textos pero mantener las áreas
+            self.detected_texts = {}
+            self.translated_texts = {}
+            
+            # Actualizar interfaz
+            self.update_selection_list()
+            self.update_page_display()
+            self.show_detection_summary()
+            
+            areas_count = len(self.selected_areas)
+            messagebox.showinfo("Limpieza completada", 
+                f"Se limpiaron los textos de {areas_count} área(s).\n\n"
+                f"Ahora puedes usar 'Detectar Texto' para extraer texto del nuevo documento.")
+
     def show_config_info(self, config_data):
         """Mostrar información de la configuración usando el config manager"""
         try:
@@ -764,7 +848,7 @@ class PDFViewer:
                 progress_bar['value'] = i + 1
                 progress_window.update()
                 
-                # Detectar texto usando el procesador OCR
+                # Detectar texto usando el procesador OCR (siempre forzar detección)
                 detected_text = self.ocr_processor.enhanced_ocr_detection(
                     area, self.pdf_document, self.page_rotations
                 )
@@ -772,6 +856,10 @@ class PDFViewer:
                 if detected_text and detected_text.strip():
                     self.detected_texts[i] = detected_text.strip()
                     detected_count += 1
+                else:
+                    # Si no se detecta texto, limpiar entrada existente
+                    if i in self.detected_texts:
+                        del self.detected_texts[i]
             
             # Cerrar ventana de progreso
             progress_window.destroy()
@@ -811,14 +899,14 @@ class PDFViewer:
             messagebox.showwarning("Advertencia", "Detecta texto en las áreas primero")
             return
         
-        # Preparar textos para traducir (solo los que no están traducidos)
+        # Preparar textos para traducir (forzar traducción de todos los textos detectados)
         texts_to_translate = {}
         for area_index, original_text in self.detected_texts.items():
-            if area_index not in self.translated_texts and original_text.strip():
+            if original_text.strip():
                 texts_to_translate[area_index] = original_text
         
         if not texts_to_translate:
-            messagebox.showinfo("Información", "Todos los textos ya están traducidos")
+            messagebox.showinfo("Información", "No hay textos detectados para traducir")
             return
         
         try:
@@ -1104,7 +1192,14 @@ class PDFViewer:
         messagebox.showerror("Error en Traducción", f"La traducción falló:\n\n{error_message}")
     
     def generate_output_pdf(self):
-        """Generar PDF de salida con traducciones sobrepuestas"""
+        """Generar PDF de salida con traducciones sobrepuestas
+        
+        MEJORAS DE RENDERIZADO:
+        - Usa el mismo método de cálculo de fuente que la visualización
+        - Optimiza el tamaño de fuente para aprovechar al máximo el área disponible
+        - Ajusta las métricas de fuente específicamente para PDF (Helvetica)
+        - Mantiene consistencia entre lo que se ve en pantalla y lo que se exporta
+        """
         if not self.pdf_document or not self.translated_texts:
             messagebox.showwarning("Advertencia", "Carga un PDF y traduce texto primero")
             return
@@ -1150,36 +1245,47 @@ class PDFViewer:
                         
                         # Usar tamaño de fuente específico del área o el global
                         area_font_size = area.get('font_size', self.global_font_size)
-                        font_size = min(area_font_size, area_height / 3)
                         
-                        # Insertar texto traducido con márgenes
-                        margin = 3
+                        # Insertar texto traducido con márgenes consistentes
+                        margin = 4  # Margen ligeramente mayor para mejor legibilidad
                         text_rect_width = area_width - (2 * margin)
                         text_rect_height = area_height - (2 * margin)
                         
                         if text_rect_width > 0 and text_rect_height > 0:
+                            # CLAVE: Usar el mismo método de cálculo que en la visualización, pero para PDF
+                            optimal_font_size = self.calculate_optimal_font_size(
+                                translation, text_rect_width, text_rect_height, area_font_size, for_pdf=True
+                            )
+                            
+                            # Ajustar texto con algoritmo mejorado para PDF
                             wrapped_text, adjusted_font_size = self.wrap_text_to_fit(
-                                translation, text_rect_width, text_rect_height, font_size
+                                translation, text_rect_width, text_rect_height, optimal_font_size
                             )
                             
                             # Crear rectángulo para el texto
                             text_rect = fitz.Rect(x1 + margin, y1 + margin, x2 - margin, y2 - margin)
                             
-                            # Insertar texto
+                            # Insertar texto con parámetros optimizados
                             new_page.insert_textbox(
                                 text_rect,
                                 wrapped_text,
                                 fontsize=adjusted_font_size,
                                 color=self.block_text_color,
-                                fontname="helv",
-                                align=0
+                                fontname="helv",  # Helvetica - fuente consistente
+                                align=0  # Alineación izquierda
                             )
             
             # Guardar documento
             output_doc.save(output_path)
             output_doc.close()
             
-            messagebox.showinfo("Éxito", f"PDF traducido guardado en: {output_path}")
+            # Mostrar mensaje de éxito con información adicional
+            areas_count = len([i for i in self.translated_texts.keys() if i < len(self.selected_areas)])
+            messagebox.showinfo("Éxito", 
+                f"PDF traducido guardado en: {output_path}\n\n"
+                f"• Áreas exportadas: {areas_count}\n"
+                f"• Optimización de fuente: Activada\n"
+                f"• Consistencia visual: Mejorada")
             
         except Exception as e:
             messagebox.showerror("Error", f"No se pudo generar el PDF: {str(e)}")
@@ -1481,11 +1587,12 @@ class PDFViewer:
             return '\n'.join(lines), min_font_size
             
         except Exception as e:
+            # Fallback de emergencia - usar parámetros del método
             max_chars = max(10, int((max_width * max_height) / (4 * 8)))
             truncated = text[:max_chars] + "..." if len(text) > max_chars else text
             return truncated, 4
 
-    def calculate_optimal_font_size(self, text, rect_width, rect_height, max_font_size=24):
+    def calculate_optimal_font_size(self, text, rect_width, rect_height, max_font_size=24, for_pdf=False):
         """Calcular el tamaño de fuente óptimo para aprovechar al máximo el ancho y alto del área"""
         import tkinter.font as tkFont
         if not text.strip():
@@ -1497,57 +1604,112 @@ class PDFViewer:
         def calculate_text_metrics(font_size):
             """Calcular métricas del texto para un tamaño de fuente dado"""
             try:
-                font = tkFont.Font(family="Arial", size=font_size)
-                line_height = font.metrics('linespace')
-                total_lines = 0
-                max_line_width = 0  # Ancho máximo de línea
-                
-                for paragraph in paragraphs:
-                    if not paragraph.strip():
-                        total_lines += 1
-                        continue
+                if for_pdf:
+                    # Usar estimación más precisa para PDF
+                    char_width_factor = 0.55  # Helvetica promedio
+                    line_height_factor = 1.15  # Espaciado entre líneas
+                    char_width = font_size * char_width_factor
+                    line_height = font_size * line_height_factor
                     
-                    words = paragraph.split()
-                    if not words:
-                        total_lines += 1
-                        continue
+                    total_lines = 0
+                    max_line_width = 0
                     
-                    current_line_width = 0
-                    lines_needed = 1
-                    
-                    for word in words:
-                        word_width = font.measure(word + " ")
+                    for paragraph in paragraphs:
+                        if not paragraph.strip():
+                            total_lines += 1
+                            continue
                         
-                        # Verificar si la palabra cabe en la línea actual
-                        if current_line_width + word_width <= rect_width - 8:
-                            current_line_width += word_width
-                            max_line_width = max(max_line_width, current_line_width)
-                        else:
-                            # Nueva línea necesaria
-                            lines_needed += 1
-                            current_line_width = word_width
-                            max_line_width = max(max_line_width, current_line_width)
+                        words = paragraph.split()
+                        if not words:
+                            total_lines += 1
+                            continue
+                        
+                        current_line_width = 0
+                        lines_needed = 1
+                        
+                        for word in words:
+                            word_width = len(word + " ") * char_width
                             
-                            # Manejar palabras muy largas
-                            if word_width > rect_width - 8:
-                                chars_per_line = max(1, int((rect_width - 8) / (font_size * 0.6)))
-                                extra_lines = max(0, (len(word) - 1) // chars_per_line)
-                                lines_needed += extra_lines
+                            if current_line_width + word_width <= rect_width - 8:
+                                current_line_width += word_width
+                                max_line_width = max(max_line_width, current_line_width)
+                            else:
+                                lines_needed += 1
+                                current_line_width = word_width
+                                max_line_width = max(max_line_width, current_line_width)
+                                
+                                if word_width > rect_width - 8:
+                                    chars_per_line = max(1, int((rect_width - 8) / char_width))
+                                    extra_lines = max(0, (len(word) - 1) // chars_per_line)
+                                    lines_needed += extra_lines
+                        
+                        total_lines += lines_needed
                     
-                    total_lines += lines_needed
-                
-                total_height = total_lines * line_height
-                width_utilization = max_line_width / (rect_width - 8) if rect_width > 8 else 0
-                height_utilization = total_height / (rect_height - 8) if rect_height > 8 else 0
-                
-                return {
-                    'total_lines': total_lines,
-                    'total_height': total_height,
-                    'max_line_width': max_line_width,
-                    'width_utilization': width_utilization,
-                    'height_utilization': height_utilization,
-                    'fits': total_height <= rect_height - 8
-                }
+                    total_height = total_lines * line_height
+                    width_utilization = max_line_width / (rect_width - 8) if rect_width > 8 else 0
+                    height_utilization = total_height / (rect_height - 8) if rect_height > 8 else 0
+                    
+                    return {
+                        'total_lines': total_lines,
+                        'total_height': total_height,
+                        'max_line_width': max_line_width,
+                        'width_utilization': width_utilization,
+                        'height_utilization': height_utilization,
+                        'fits': total_height <= rect_height - 8
+                    }
+                else:
+                    # Usar fuente tkinter para canvas
+                    font = tkFont.Font(family="Arial", size=font_size)
+                    line_height = font.metrics('linespace')
+                    total_lines = 0
+                    max_line_width = 0  # Ancho máximo de línea
+                    
+                    for paragraph in paragraphs:
+                        if not paragraph.strip():
+                            total_lines += 1
+                            continue
+                        
+                        words = paragraph.split()
+                        if not words:
+                            total_lines += 1
+                            continue
+                        
+                        current_line_width = 0
+                        lines_needed = 1
+                        
+                        for word in words:
+                            word_width = font.measure(word + " ")
+                            
+                            # Verificar si la palabra cabe en la línea actual
+                            if current_line_width + word_width <= rect_width - 8:
+                                current_line_width += word_width
+                                max_line_width = max(max_line_width, current_line_width)
+                            else:
+                                # Nueva línea necesaria
+                                lines_needed += 1
+                                current_line_width = word_width
+                                max_line_width = max(max_line_width, current_line_width)
+                                
+                                # Manejar palabras muy largas
+                                if word_width > rect_width - 8:
+                                    chars_per_line = max(1, int((rect_width - 8) / (font_size * 0.6)))
+                                    extra_lines = max(0, (len(word) - 1) // chars_per_line)
+                                    lines_needed += extra_lines
+                        
+                        total_lines += lines_needed
+                    
+                    total_height = total_lines * line_height
+                    width_utilization = max_line_width / (rect_width - 8) if rect_width > 8 else 0
+                    height_utilization = total_height / (rect_height - 8) if rect_height > 8 else 0
+                    
+                    return {
+                        'total_lines': total_lines,
+                        'total_height': total_height,
+                        'max_line_width': max_line_width,
+                        'width_utilization': width_utilization,
+                        'height_utilization': height_utilization,
+                        'fits': total_height <= rect_height - 8
+                    }
             except Exception:
                 return None
         
@@ -2023,16 +2185,19 @@ class PDFViewer:
         if 'e' in self.resize_handle:
             x2 = canvas_x
         
-        # Asegurar que las coordenadas estén en orden correcto
-        if x1 > x2:
-            x1, x2 = x2, x1
-        if y1 > y2:
-            y1, y2 = y2, y1
+        # Asegurarse de que no se salga de los límites de la página
+        page = self.pdf_document[self.current_page]
+        page_width = page.rect.width
+        page_height = page.rect.height
         
-        
-        # Verificar tamaño mínimo
-        if abs(x2 - x1) < 20 or abs(y2 - y1) < 20:
-            return
+        if x1 < 0:
+            offset = -x1
+            x1 += offset
+            x2 += offset
+        elif x2 > page_width:
+            offset = x2 - page_width
+            x1 -= offset
+            x2 -= offset
         
         # Actualizar coordenadas del área
         area['canvas_coords'] = (x1, y1, x2, y2)
@@ -2064,13 +2229,14 @@ class PDFViewer:
         
         # Si el texto tiene múltiples líneas, preservar la estructura
         if len(original_lines) > 1:
-            return self._fit_multiline_text(original_lines, rect_width, rect_height, font_size)
+            return self._fit_multiline_text_pdf(original_lines, rect_width, rect_height, font_size, fontname)
         
         # Si es una sola línea, usar el método de ajuste automático por palabras
-        return self._fit_single_line_text(normalized_text, rect_width, rect_height, font_size)
-    
-    def _fit_multiline_text(self, original_lines, rect_width, rect_height, font_size):
-        """Ajustar texto que ya tiene múltiples líneas preservando la estructura original"""
+        return self._fit_single_line_text_pdf(normalized_text, rect_width, rect_height, font_size, fontname)
+    def _fit_multiline_text_pdf(self, original_lines, rect_width, rect_height, font_size, fontname="helv"):
+        """Ajustar texto que ya tiene múltiples líneas preservando la estructura original para PDF"""
+        import tkinter.font as tkFont
+        
         # Limpiar líneas vacías del inicio y final, pero preservar las intermedias
         while original_lines and not original_lines[0].strip():
             original_lines.pop(0)
@@ -2080,10 +2246,15 @@ class PDFViewer:
         if not original_lines:
             return "", font_size
         
-        # Probar diferentes tamaños de fuente
-        for test_font_size in [font_size, font_size * 0.9, font_size * 0.8, font_size * 0.7, font_size * 0.6, font_size * 0.5]:
-            char_width = test_font_size * 0.55
-            line_height = test_font_size * 1.2
+        # Factores de ajuste para fuentes PDF (más precisos que la estimación simple)
+        # Helvetica (helv) tiene un factor de ancho promedio de ~0.5-0.6
+        char_width_factor = 0.55  # Ajustado para helvetica
+        line_height_factor = 1.15  # Espaciado entre líneas más realista
+        
+        # Probar diferentes tamaños de fuente, empezando por el deseado
+        for test_font_size in [font_size, font_size * 0.95, font_size * 0.9, font_size * 0.85, font_size * 0.8, font_size * 0.7, font_size * 0.6]:
+            char_width = test_font_size * char_width_factor
+            line_height = test_font_size * line_height_factor
             
             # Verificar si todas las líneas caben en ancho y altura
             adjusted_lines = []
@@ -2140,86 +2311,29 @@ class PDFViewer:
             if total_height <= rect_height - 6:  # Margen de 3px arriba y abajo
                 return "\n".join(adjusted_lines), test_font_size
         
-        # Si nada funciona, usar el tamaño más pequeño
-        return "\n".join(original_lines), font_size * 0.4
-    
-    def _fit_single_line_text(self, text, rect_width, rect_height, font_size):
-        """Ajustar texto de una sola línea con saltos automáticos por palabras"""
-        words = text.split()
-        if not words:
-            return text, font_size
+        # Si nada funciona, usar el tamaño más pequeño con texto truncado
+        min_font_size = max(4, font_size * 0.4)
+        char_width = min_font_size * char_width_factor
+        line_height = min_font_size * line_height_factor
+        max_lines = max(1, int((rect_height - 6) / line_height))
         
-        # Probar diferentes tamaños de fuente si es necesario
-        for test_font_size in [font_size, font_size * 0.9, font_size * 0.8, font_size * 0.7, font_size * 0.6]:
-            lines = []
-            current_line = []
-            
-            # Estimar ancho promedio de carácter
-            char_width = test_font_size * 0.55
-            
-            for word in words:
-                # Probar agregar la palabra a la línea actual
-                test_line = current_line + [word]
-                test_text = " ".join(test_line)
-                
-                # Estimar el ancho del texto
-                estimated_width = len(test_text) * char_width
-                
-                if estimated_width <= rect_width - 6:  # Dejar margen de 3px a cada lado
-                    current_line = test_line
-                else:
-                    # La línea no cabe, guardar la anterior y empezar nueva
-                    if current_line:
-                        lines.append(" ".join(current_line))
-                        current_line = [word]
-                    else:
-                        # Incluso una palabra sola no cabe, dividirla
-                        if len(word) > 15:
-                            chars_per_line = max(1, int((rect_width - 6) / char_width))
-                            for i in range(0, len(word), chars_per_line):
-                                chunk = word[i:i+chars_per_line]
-                                if i + chars_per_line < len(word):
-                                    chunk += "-"
-                                lines.append(chunk)
-                        else:
-                            lines.append(word)
-            
-            # Agregar la última línea
-            if current_line:
-                lines.append(" ".join(current_line))
-            
-            # Verificar si todas las líneas caben en la altura
-            line_height = test_font_size * 1.2  # Factor de espaciado entre líneas reducido
-            total_height = len(lines) * line_height
-            
-            if total_height <= rect_height - 6:  # Dejar margen de 3px arriba y abajo
-                return "\n".join(lines), test_font_size
-        
-        # Si nada funciona, usar el texto original con el tamaño más pequeño y dividir por líneas
-        min_font_size = font_size * 0.4
-        char_width = min_font_size * 0.55
-        chars_per_line = max(1, int((rect_width - 6) / char_width))
-        
-        # Dividir texto en líneas de longitud fija si no hay otra opción
-        lines = []
-        remaining_text = text
-        while remaining_text:
-            if len(remaining_text) <= chars_per_line:
-                lines.append(remaining_text)
+        # Tomar solo las primeras líneas que caben
+        final_lines = []
+        for i, line in enumerate(original_lines):
+            if i >= max_lines:
                 break
-            else:
-                # Buscar un espacio cerca del final de la línea
-                cut_point = chars_per_line
-                while cut_point > 0 and remaining_text[cut_point] != ' ':
-                    cut_point -= 1
+            line = line.strip()
+            if not line:
+                final_lines.append("")
+                continue
                 
-                if cut_point == 0:  # No se encontró espacio, cortar en seco
-                    cut_point = chars_per_line
-                
-                lines.append(remaining_text[:cut_point])
-                remaining_text = remaining_text[cut_point:].lstrip()
+            # Truncar línea si es muy larga
+            chars_per_line = max(1, int((rect_width - 6) / char_width))
+            if len(line) > chars_per_line:
+                line = line[:chars_per_line-3] + "..."
+            final_lines.append(line)
         
-        return "\n".join(lines), min_font_size
+        return "\n".join(final_lines), min_font_size
 
     def adjust_selected_area(self, direction):
         """Ajustar horizontalmente el área seleccionada"""
